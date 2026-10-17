@@ -6,7 +6,7 @@ const lesson: Lesson = {
   trackId: 't0',
   index: 1,
   title: 'What Training Is',
-  minutes: 15,
+  minutes: 20,
   hook: 'A model is a function with knobs. Training is four lines in a loop — run it, score it, ask each knob which way is downhill, nudge it — repeated until the score stops improving.',
   exercise: 'read+quiz',
   takeaway: {
@@ -66,18 +66,137 @@ Repeat until the loss stops falling. Everything else in this course — autograd
 
 ## The smallest model there is
 
-Three data points that happen to lie on a line: \`(1, 3)\`, \`(2, 5)\`, \`(3, 7)\`. The model is \`y = w·x + b\` — two knobs. The loss is **mean squared error**: the average of (prediction − target)².
+Before a model with billions of knobs, watch one with **two** learn, step by step, with nothing but arithmetic. Every number below can be checked with a calculator.
 
-Start with both knobs at zero. Every prediction is 0, the errors are −3, −5 and −7, and the loss is (9 + 25 + 49) / 3 = **27.67**.
+### Step 1 — the data
 
-For this loss the gradient can be written down by hand (A1.L1 shows where it comes from):
+Three points:
+
+| x | y (the right answer) |
+|---|---|
+| 1 | 3 |
+| 2 | 5 |
+| 3 | 7 |
+
+You can probably spot the rule already: **y = 2x + 1**. The point of the exercise is to watch the computer *discover* the 2 and the 1 without being told.
+
+### Step 2 — the model
+
+The model is a straight line:
 
 \`\`\`
-dL/dw = (2/3) · Σ (pred − y) · x  = (2/3) · (−3·1 − 5·2 − 7·3) = −22.67
-dL/db = (2/3) · Σ (pred − y)      = (2/3) · (−3 − 5 − 7)       = −10.00
+prediction = w · x + b
 \`\`\`
 
-Both are negative: increasing either knob decreases the loss. With a **learning rate** of 0.05, the step moves \`w\` by 0.05 × 22.67 = 1.13 and \`b\` by 0.05 × 10 = 0.5.`,
+It has two knobs. **w** sets how steep the line is (it should end up at 2); **b** slides the line up or down (it should end up at 1). Training means finding good values for w and b. A language model is the same idea with billions of knobs instead of two.
+
+### Step 3 — start with a bad guess
+
+Set both knobs to zero: w = 0, b = 0. Then every prediction is 0 × x + 0 = 0:
+
+| x | right answer | prediction | error = prediction − answer |
+|---|---|---|---|
+| 1 | 3 | 0 | −3 |
+| 2 | 5 | 0 | −5 |
+| 3 | 7 | 0 | −7 |
+
+A negative error means the prediction is too **low**.`,
+    },
+    {
+      type: 'prose',
+      md: `### Step 4 — score it with one number: the loss
+
+We want a single number that says "how wrong is the model overall". Two decisions:
+
+1. **Square each error.** This makes every error positive (so a −5 and a +5 can't cancel out to "perfect") and makes big misses count much more than small ones (an error of 7 costs 49, not 7).
+2. **Average them**, so the score doesn't depend on how many points there are.
+
+\`\`\`
+squares:   (−3)² = 9     (−5)² = 25     (−7)² = 49
+sum:       9 + 25 + 49 = 83
+average:   83 ÷ 3 = 27.67
+\`\`\`
+
+That average is the **loss** — here, **27.67**. This particular recipe is called **mean squared error**. Lower is better; 0 would mean every prediction is exactly right. **Everything training does is aimed at pushing this one number down.**
+
+### Step 5 — which way should each knob move? The gradient
+
+Now the key question: *if I nudge a knob up a tiny bit, does the loss go up or down — and by how much?*
+
+**The slow way, by experiment.** Nudge w from 0 to 0.001 and recompute the loss: it becomes 27.644, a drop of 0.0227. So the loss falls by about 22.7 for every 1 unit of w — at least for small moves. Nudge b to 0.001 instead and the loss drops by 0.0100: about 10 per unit of b. Those two rates are the **gradient**: one number per knob.
+
+**The fast way, by formula.** For this loss there is a shortcut that gives both numbers without any nudging (A1.L1 derives it):
+
+\`\`\`
+for w:  (2/3) × Σ (error × x)
+for b:  (2/3) × Σ (error)
+\`\`\`
+
+Σ just means "add these up over the three points". Fill in the errors from step 3:
+
+\`\`\`
+for w:  error × x  →  (−3 × 1) + (−5 × 2) + (−7 × 3)  =  −3 − 10 − 21  =  −34
+        × 2/3      →  −34 × 2/3  =  −22.67
+
+for b:  errors     →  −3 − 5 − 7  =  −15
+        × 2/3      →  −15 × 2/3  =  −10.00
+\`\`\`
+
+The same −22.67 and −10 the experiment found. In practice frameworks use the fast way — the slow way needs a separate experiment for every knob, which is hopeless with billions of them.`,
+    },
+    {
+      type: 'callout',
+      variant: 'info',
+      title: 'Where the pieces of the formula come from',
+      md: `- **Why multiply by x for w?** w's effect on a prediction is multiplied by x: changing w by 1 moves the prediction for x = 3 by 3, but the prediction for x = 1 by only 1. So points with a bigger x have more say in which way w should move. b moves every prediction by the same amount, so its formula just adds up the errors.
+- **Why the 2?** It comes from squaring. If an error grows a little, its square grows about **twice the error** times that little bit — for example 7² = 49 but 7.01² = 49.14, an increase of 0.14 = 2 × 7 × 0.01.
+- **Why divide by 3?** Because the loss is an *average* over three points.
+- **How to read the sign.** Both numbers are **negative**: increasing the knob makes the loss go **down**. A positive number would mean the opposite. The size says how strongly the loss cares — right now w matters about twice as much as b.`,
+    },
+    {
+      type: 'prose',
+      md: `### Step 6 — take a small step downhill
+
+Move each knob a little in the direction that lowers the loss. How big is "a little" is set by the **learning rate** — here, 0.05:
+
+\`\`\`
+new knob = old knob − learning rate × gradient
+
+new w = 0 − 0.05 × (−22.67) = 0 + 1.133 = 1.133
+new b = 0 − 0.05 × (−10.00) = 0 + 0.500 = 0.500
+\`\`\`
+
+The minus sign is what makes it "downhill": a negative gradient means *increase* the knob, a positive one means *decrease* it.
+
+### Step 7 — check that it helped
+
+With w = 1.133 and b = 0.5, predict again:
+
+| x | right answer | prediction = 1.133·x + 0.5 | error |
+|---|---|---|---|
+| 1 | 3 | 1.633 | −1.367 |
+| 2 | 5 | 2.767 | −2.233 |
+| 3 | 7 | 3.900 | −3.100 |
+
+\`\`\`
+loss = (1.367² + 2.233² + 3.100²) ÷ 3 = (1.87 + 4.99 + 9.61) ÷ 3 = 5.49
+\`\`\`
+
+**27.67 → 5.49 in one step.** The errors are still negative (still too low), but much smaller.
+
+### Step 8 — repeat
+
+Run steps 3 to 7 again from the new knobs. The second gradient uses the new errors:
+
+\`\`\`
+for w:  (−1.367 × 1) + (−2.233 × 2) + (−3.100 × 3) = −15.13,   × 2/3 = −10.09
+for b:  −1.367 − 2.233 − 3.100 = −6.70,                         × 2/3 = −4.47
+
+new w = 1.133 + 0.05 × 10.09 = 1.638
+new b = 0.500 + 0.05 × 4.47  = 0.723      →  loss 1.09
+\`\`\`
+
+Notice the gradients got **smaller** (−10.09 instead of −22.67): the model is closer to right, so there is less to fix, so the steps shrink on their own. Keep going and the loop settles on the answer:`,
     },
     {
       type: 'statline',
@@ -90,11 +209,13 @@ Both are negative: increasing either knob decreases the loss. With a **learning 
     },
     {
       type: 'prose',
-      md: `Arithmetic you can redo with a calculator, or with the twelve lines of Python below. Notice two things.
+      md: `By step 10, w ≈ 2.04 and b ≈ 0.91 — almost exactly the rule y = 2x + 1 that we never told it. The four moves are the same every time: **predict → score → gradient → step**. Notice two things.
 
 **The loss falls fast, then slowly.** Most of the improvement is in the first few steps; after step 10, \`w\` and \`b\` crawl towards 2 and 1 because the gradient — the slope — is nearly flat near the bottom. Every real loss curve has this shape.
 
-**The learning rate is not a detail.** Run the same code at 0.2 and after 20 steps the loss is **50,640**; at 0.3 it is about **2 × 10¹⁵**. Each step overshoots the bottom by more than it started, so the next gradient is bigger, so the next overshoot is bigger. This is **divergence**, and it is the first failure mode you will meet in a real run (P1.L6).`,
+**The learning rate is not a detail.** Redo step 6 with a learning rate of 0.2 instead of 0.05: w jumps to 0.2 × 22.67 = 4.53 and b to 0.2 × 10 = 2. The new predictions are 6.53, 11.07 and 15.60 — now far too **high**, with errors of +3.53, +6.07 and +8.60, and the loss *rises* from 27.67 to **41.08**. The step overshot the answer. The next gradient is bigger (the errors are bigger), so the next overshoot is bigger again: after 20 steps the loss is **50,640**, and at 0.3 it is about **2 × 10¹⁵**. This is **divergence**, the first failure mode you will meet in a real run (P1.L6). Too small a learning rate is safe but slow; too large never arrives.
+
+The same loop, in twelve lines of Python, if you want to run it yourself:`,
     },
     {
       type: 'code',

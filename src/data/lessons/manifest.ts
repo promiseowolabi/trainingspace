@@ -37,7 +37,7 @@ export const LESSON_META: LessonMeta[] = [
     trackId: "t0",
     index: 1,
     title: "What Training Is",
-    minutes: 15,
+    minutes: 20,
     hook: "A model is a function with knobs. Training is four lines in a loop — run it, score it, ask each knob which way is downhill, nudge it — repeated until the score stops improving.",
     exercise: "read+quiz",
     takeaway: { number: "27.7 → 0.001 in 10 steps", claim: "Gradient descent on y = w·x + b took the loss from 27.7 to 0.001 in ten steps at learning rate 0.05, and to 50,640 — divergence — at 0.2: the same four lines, one knob of difference." },
