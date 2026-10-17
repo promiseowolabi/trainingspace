@@ -1,0 +1,5 @@
+# One virtualenv for every lab: python3 -m venv .venv && . .venv/bin/activate
+numpy>=1.26
+pytest>=8
+# Only the local (PyTorch) labs need torch; the CPU build is enough:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu

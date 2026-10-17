@@ -1,0 +1,61 @@
+import { Suspense, lazy } from 'react'
+import { Routes, Route } from 'react-router'
+import Layout from '@/components/Layout'
+import Home from '@/pages/Home'
+
+/**
+ * Routing contract: Layout renders `{children}` (pattern A), so App wraps
+ * `<Layout><Routes>…</Routes></Layout>` — never mix with <Outlet/>.
+ *
+ * Pages are route-level lazy chunks: the lesson registry (all the prose), the
+ * lab guides ride with their own page, not with first paint.
+ */
+const Curriculum = lazy(() => import('@/pages/Curriculum'))
+const Track = lazy(() => import('@/pages/Track'))
+const Lesson = lazy(() => import('@/pages/Lesson'))
+const Labs = lazy(() => import('@/pages/Labs'))
+const LabPage = lazy(() => import('@/pages/LabPage'))
+const Capstone = lazy(() => import('@/pages/Capstone'))
+const Progress = lazy(() => import('@/pages/Progress'))
+const NotFound = lazy(() => import('@/pages/NotFound'))
+
+function RouteFallback() {
+  return (
+    /*
+     * `data-route-fallback` exists for the browser e2e. It used to detect the
+     * loading state by matching #root's text against /^loading…$/, which never
+     * matched because the fallback renders INSIDE Layout alongside the nav and
+     * footer — so every route "mounted" instantly, the e2e measured chrome-only
+     * text, and a route that rendered nothing at all passed. An explicit marker
+     * cannot be defeated that way.
+     */
+    <div
+      data-route-fallback
+      className="mx-auto max-w-app px-6 pb-24 pt-24 lg:px-12"
+    >
+      <p className="animate-pulse font-mono text-[11px] uppercase tracking-[0.16em] text-text-3">
+        loading…
+      </p>
+    </div>
+  )
+}
+
+export default function App() {
+  return (
+    <Layout>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/curriculum" element={<Curriculum />} />
+          <Route path="/tracks/:trackId" element={<Track />} />
+          <Route path="/lesson/:lessonId" element={<Lesson />} />
+          <Route path="/labs" element={<Labs />} />
+          <Route path="/labs/:labId" element={<LabPage />} />
+          <Route path="/capstone" element={<Capstone />} />
+          <Route path="/progress" element={<Progress />} />
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
+    </Layout>
+  )
+}

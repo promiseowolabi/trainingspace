@@ -1,0 +1,8 @@
+{
+  "name": "trainingspace",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:24-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/python:1": { "version": "3.12" }
+  },
+  "postCreateCommand": "npm ci && pip install numpy pytest && pip install torch --index-url https://download.pytorch.org/whl/cpu"
+}

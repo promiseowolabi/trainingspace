@@ -1,0 +1,2326 @@
+# T0.L1 — What Training Is
+
+_Track T0: The Training Contract · ~15 min · trainingspace_
+
+> A model is a function with knobs. Training is four lines in a loop — run it, score it, ask each knob which way is downhill, nudge it — repeated until the score stops improving.
+Strip the vocabulary off any training run — a 7-billion-parameter language model, a fraud classifier, the line of best fit in a spreadsheet — and the same four steps are left:
+
+1. **Forward.** Run the model on some inputs and get its predictions.
+2. **Loss.** Score the predictions against the right answers with one number: how wrong, on average.
+3. **Backward.** For every knob (parameter) in the model, work out which direction makes the loss smaller, and how strongly the loss responds. That vector of sensitivities is the **gradient**.
+4. **Step.** Move every parameter a small distance in the downhill direction.
+
+Repeat until the loss stops falling. Everything else in this course — autograd, Adam, attention, bf16, ZeRO, DPO — is either a better way to do one of those four steps, or a way to do them on more data, faster, with less memory.
+
+---
+
+```python
+for batch in data:
+    predictions = model(batch.inputs)            # 1. forward
+    loss = loss_fn(predictions, batch.targets)   # 2. loss
+    grads = gradient(loss, model.parameters)     # 3. backward
+    for p, g in zip(model.parameters, grads):    # 4. step
+        p -= learning_rate * g
+```
+
+---
+
+_You already run this loop_
+
+- **a load test tuning a connection pool** (change the pool size, rerun, read p99, keep the change if p99 fell) ≡ **one training step** (change the weights, rerun the batch, read the loss, keep the change because the gradient promised it would fall)
+- **p99 latency** (one number that summarises how bad things are) ≡ **the loss** (one number that summarises how wrong the predictions are)
+- **a flame graph** (which function is responsible for how much of the time) ≡ **the gradient** (which parameter is responsible for how much of the loss — and in which direction)
+
+---
+
+The difference from your load test is step 3. You find out which way to turn a pool-size knob by trying both directions. A model has millions of knobs; trying each one both ways would cost two forward passes per parameter per step. The gradient gives you **all of them at once**, for roughly the price of one extra forward pass. A1 is about how.
+
+## The smallest model there is
+
+Three data points that happen to lie on a line: `(1, 3)`, `(2, 5)`, `(3, 7)`. The model is `y = w·x + b` — two knobs. The loss is **mean squared error**: the average of (prediction − target)².
+
+Start with both knobs at zero. Every prediction is 0, the errors are −3, −5 and −7, and the loss is (9 + 25 + 49) / 3 = **27.67**.
+
+For this loss the gradient can be written down by hand (A1.L1 shows where it comes from):
+
+```
+dL/dw = (2/3) · Σ (pred − y) · x  = (2/3) · (−3·1 − 5·2 − 7·3) = −22.67
+dL/db = (2/3) · Σ (pred − y)      = (2/3) · (−3 − 5 − 7)       = −10.00
+```
+
+Both are negative: increasing either knob decreases the loss. With a **learning rate** of 0.05, the step moves `w` by 0.05 × 22.67 = 1.13 and `b` by 0.05 × 10 = 0.5.
+
+---
+
+- **27.67** — loss at step 0 (w = 0, b = 0: every prediction is 0)
+- **5.49** — after 1 step (w = 1.13, b = 0.50)
+- **1.09** — after 2 steps (w = 1.64, b = 0.72)
+- **0.0011** — after 10 steps (w = 2.04, b = 0.91 — close to the true 2 and 1)
+
+---
+
+Arithmetic you can redo with a calculator, or with the twelve lines of Python below. Notice two things.
+
+**The loss falls fast, then slowly.** Most of the improvement is in the first few steps; after step 10, `w` and `b` crawl towards 2 and 1 because the gradient — the slope — is nearly flat near the bottom. Every real loss curve has this shape.
+
+**The learning rate is not a detail.** Run the same code at 0.2 and after 20 steps the loss is **50,640**; at 0.3 it is about **2 × 10¹⁵**. Each step overshoots the bottom by more than it started, so the next gradient is bigger, so the next overshoot is bigger. This is **divergence**, and it is the first failure mode you will meet in a real run (P1.L6).
+
+---
+
+```python
+xs, ys = [1, 2, 3], [3, 5, 7]
+w, b, lr = 0.0, 0.0, 0.05
+
+for step in range(11):
+    preds = [w * x + b for x in xs]                                  # forward
+    loss = sum((p - y) ** 2 for p, y in zip(preds, ys)) / len(xs)    # loss
+    dw = 2 / len(xs) * sum((p - y) * x for p, y, x in zip(preds, ys, xs))
+    db = 2 / len(xs) * sum(p - y for p, y in zip(preds, ys))         # backward
+    print(f"step {step:2}  w={w:.3f}  b={b:.3f}  loss={loss:.4f}")
+    w -= lr * dw                                                     # step
+    b -= lr * db
+```
+
+---
+
+_fig 1 — one training step_
+
+Components: parameters (w, b) · forward (preds = w·x + b) · loss (mean (pred − y)²) · data (x, y) · backward (dL/dw, dL/db) · step (p −= lr · g)
+
+Steps:
+1. Forward: the current parameters turn inputs into predictions. Nothing is learned here; this is just running the function.
+2. Loss: predictions are compared with the targets from the data and collapsed into one number — mean squared error for this model.
+3. Backward: the gradient says, for each parameter, how much the loss changes per unit nudge, and in which direction. One number per parameter.
+4. Step: every parameter moves against its gradient by learning-rate × gradient. Then the loop starts again with the updated parameters.
+
+---
+
+## From two knobs to billions
+
+A language model runs the identical loop. What changes is the size of every box:
+
+| | the line | a small GPT (capstone) | a 7B model |
+|---|---|---|---|
+| parameters | 2 | ~5 million | 7 × 10⁹ |
+| one example | a number | 256 tokens of text | 4,096+ tokens |
+| loss | squared error | cross-entropy over the vocabulary (O1.L2) | same |
+| backward | by hand | autograd (A1) | autograd, sharded over GPUs (D1) |
+| step | `p -= lr * g` | AdamW with a schedule (O1.L3–L4) | same, in mixed precision (P1.L3) |
+
+Each row of that table is a track of this course. The loop is the contract they all honour.
+
+---
+
+> **[warning]** The loss measures how wrong the model is **on the data you score it on**. A model with enough knobs can drive training loss towards zero by memorising the training set and still be useless on anything new. That is why every real run holds some data back and reports a **validation loss** as well (O1.L6). The line above has two knobs and three points, so it cannot memorise — your GPT can.
+
+---
+
+**Q1. A run's loss goes 2.1, 1.8, 3.9, 47, 9.1e5, nan over its first five logged steps. What is the most likely cause, and the first thing to change?**
+   A. The model is too small — add layers
+   B. The learning rate is too large — each step overshoots and the overshoot grows; lower it
+   C. The data is shuffled badly — reshuffle
+   D. The loss function is wrong — switch to mean absolute error
+   Answer: B — Loss that falls briefly and then grows geometrically is divergence: each step overshoots further, so the next gradient is bigger. The line in this lesson does exactly that at lr 0.2. Adding layers or changing the loss does not stop an oversized step; lowering the learning rate (and, later, warmup and clipping) does.
+
+**Q2. Why do frameworks compute gradients instead of nudging each parameter up and down and measuring the loss?**
+   A. Nudging is less accurate
+   B. Nudging needs two forward passes per parameter per step — billions of passes for a large model — while the gradient for all parameters costs about one extra pass
+   C. Gradients work only for neural networks
+   D. Nudging cannot handle negative numbers
+   Answer: B — The nudge method (finite differences) is perfectly accurate enough to check gradients with (A1.L5), but its cost scales with the number of parameters. Reverse-mode autograd returns every partial derivative for a small constant multiple of one forward pass, which is the only reason training large models is feasible.
+
+**Q3. Your training loss is 0.02 and still falling, but validation loss has risen for the last three evaluations. What is happening?**
+   A. The model is still learning — keep going
+   B. The learning rate is too low
+   C. The model has started memorising the training set: training loss no longer predicts performance on new data
+   D. Validation loss is computed incorrectly; ignore it
+   Answer: C — Training loss measures fit to examples the model has seen. When it keeps falling while validation loss rises, the extra fit is memorisation, not learning. Stopping, regularising or adding data are the responses (O1.L6); "keep going" makes it worse.
+
+---
+
+- Run `fit_a_line.py` with learning rates 0.01, 0.05, 0.1, 0.15 and 0.2 and print the loss every step. Find the largest rate that still converges — about 0.18 for this data, set by the curvature of the loss: 2 ÷ the largest eigenvalue of its Hessian, 11.09 (O1.L4).
+- T0.L2 introduces the arrays that let you write the forward pass without the Python loops — the same loop, about 24,000× faster on the reference laptop (T0.L3).
+- Michael Nielsen, *Neural Networks and Deep Learning*, chapter 1 (neuralnetworksanddeeplearning.com) — the same idea, built up from a single neuron.
+# T0.L2 — Tensors and Shapes
+
+_Track T0: The Training Contract · ~18 min · trainingspace_
+
+> Half the bugs in training code are shape bugs, and most of them do not crash — numpy broadcasts the mistake into a plausible-looking wrong answer. Learn the one rule and the shape becomes the spec.
+A **tensor** is an n-dimensional array of numbers that all have the same type. The word sounds like physics; the thing is a numpy `ndarray` (or a `torch.Tensor`, which is the same idea plus a device and an autograd tape). Three attributes describe one completely:
+
+- **shape** — a tuple, one entry per dimension: `(32, 128, 768)`.
+- **dtype** — what each element is: `float32` (4 bytes), `bfloat16` (2), `int64` (8).
+- **the data** — `prod(shape)` elements, contiguous in memory.
+
+So a `(32, 128, 768)` float32 tensor is 32 × 128 × 768 = 3,145,728 numbers and **12.6 MB**. You will compute that product a lot (T0.L4).
+
+## The shape is the specification
+
+In training code almost every tensor has a conventional shape, and reading the shape tells you what the tensor *is*:
+
+| shape | name | meaning |
+|---|---|---|
+| `(B, d_in)` | a batch of inputs | B examples, d_in features each |
+| `(d_in, d_out)` | a weight matrix | maps d_in features to d_out |
+| `(B, T)` | a batch of token ids | B sequences of T tokens, integers |
+| `(B, T, C)` | activations | one C-dimensional vector per token per sequence |
+| `(B, H, T, T)` | attention scores | per head, every token's score for every other token (M1.L3) |
+| `()` | the loss | a scalar: zero dimensions, one number |
+
+Write the shape as a comment beside every line you are unsure about. Experienced practitioners do it constantly; it is the type system Python does not give you.
+
+---
+
+```python
+import numpy as np
+
+B, T, C = 4, 8, 16
+x = np.random.randn(B, T, C)      # (4, 8, 16)  activations
+W = np.random.randn(C, 3 * C)     # (16, 48)    one weight matrix
+y = x @ W                         # (4, 8, 48)  @ contracts the LAST axis of x with the FIRST of W
+mean = y.mean(axis=-1)            # (4, 8)      reducing an axis removes it...
+mean_k = y.mean(axis=-1, keepdims=True)  # (4, 8, 1)  ...unless you keep it
+centered = y - mean_k             # (4, 8, 48)  broadcasting stretches the 1
+```
+
+---
+
+## Broadcasting: the one rule
+
+The last line subtracted a `(4, 8, 1)` array from a `(4, 8, 48)` one and got `(4, 8, 48)`. That is **broadcasting**, and its rule is short enough to memorise:
+
+1. Line the two shapes up **from the right**.
+2. A missing dimension on the left counts as **1**.
+3. Each aligned pair must be **equal**, or one of them must be **1**. A 1 is stretched (virtually — no copy is made) to match the other.
+4. Otherwise: error.
+
+```
+   (8, 1, 6)        (5, 4)          (3,)
+      (7, 1)           (4,)         (4,)
+   ---------        -------        -----
+   (8, 7, 6)        (5, 4)         error: 3 vs 4
+```
+
+Lab 00 has you implement this rule without numpy, which is the fastest way to make it automatic.
+
+---
+
+_fig 1 — adding a bias to a batch_
+
+Components: x ((B, d_out)) · b ((d_out,)) · align right ((1, d_out)) · stretch the 1 ((B, d_out), no copy) · x + b ((B, d_out))
+
+Steps:
+1. A layer produces x with one row per example, and has one bias vector b shared by every example. The shapes differ: two dimensions against one.
+2. Align from the right. b has no batch dimension, so it is treated as having size 1 there: (1, d_out). The trailing d_out matches.
+3. The size-1 batch dimension is stretched to B. numpy does this with a zero stride: every row reads the same memory, nothing is copied.
+4. The add is now elementwise between two (B, d_out) views, and the result is (B, d_out). In A1.L4 you will undo this stretch in the backward pass.
+
+---
+
+> **[segfault]** Targets `y` come out of a data loader with shape `(B,)`. Predictions come out of the model with shape `(B, 1)`. You write `loss = ((pred - y) ** 2).mean()`.
+> 
+> Broadcasting turns `(B, 1) − (B,)` into **`(B, B)`**: every prediction minus every target. The loss is a finite, plausible number; it even goes down a little. The model never learns the task. Lab 00's `broadcast_shape((5, 1), (5,))` returns `(5, 5)` — that is the bug, stated as a shape. Assert shapes at the boundary where data enters the loss.
+
+---
+
+## Broadcasting instead of loops
+
+Broadcasting is not only a convenience; it is how you avoid Python loops, which run about **85 million** floating-point operations per second on the reference laptop (an Apple M5, CPython 3.12) against **2 trillion** for a numpy matmul (T0.L3). The canonical example, and lab 00's `pairwise_sq_dists`: the squared distance between every row of `X` (n, d) and every row of `Y` (m, d).
+
+```python
+diff = X[:, None, :] - Y[None, :, :]    # (n, 1, d) - (1, m, d) -> (n, m, d)
+d2 = (diff ** 2).sum(axis=-1)           # (n, m)
+```
+
+`None` (or `np.newaxis`) inserts a size-1 axis exactly where you want the stretching to happen. The cost is visible in the shape: the intermediate is **n × m × d** numbers. For n = m = 10,000 and d = 768 in float32 that is 307 GB — a reason the real implementation expands `|x − y|² = |x|² − 2x·y + |y|²` and uses a matmul instead. Broadcasting removes the loop, not the memory.
+
+---
+
+**Hands-on lab 00: Shapes, FLOPs and Bytes** (graded in your browser) — Implement the broadcasting rule by hand, vectorise the distance matrix, and write a linear layer that accepts any number of batch dimensions — then the FLOP and byte counts from T0.L3 and T0.L4. Runs in your browser.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/numpy-shapes
+
+---
+
+**Q1. logits has shape (32, 10) and you compute logits - logits.max(axis=1). What happens?**
+   A. Each row has its own max subtracted, as intended
+   B. An error: (32, 10) and (32,) do not broadcast, because (32,) aligns with the 10, not the 32
+   C. Each column has its own max subtracted
+   D. The result has shape (32, 32)
+   Answer: B — max(axis=1) returns (32,). Aligned from the right, 32 meets 10: neither is 1, so numpy raises. With keepdims=True the max is (32, 1), which stretches across the 10 columns — the stable-softmax idiom you will write in lab 02. Had the shape been (10, 10) there would be no error and each column would get the wrong row's max: the silent version of the same bug.
+
+**Q2. A loss is computed as ((pred - y) ** 2).mean() with pred of shape (B, 1) and y of shape (B,). Training runs, the loss falls slightly, the model is useless. Why?**
+   A. The learning rate is too small
+   B. pred − y broadcasts to (B, B): every prediction is compared with every target, so the loss rewards predicting the batch mean
+   C. mean() should be sum()
+   D. Squared error cannot train a regression model
+   Answer: B — (B, 1) and (B,) align as (B, 1) against (1, B) and broadcast to (B, B). The minimiser of that loss is a constant near the mean of all targets, so the loss improves a little and then stalls. The fix is to make the shapes equal — y[:, None] or pred.squeeze(-1) — and to assert it.
+
+**Q3. How much memory does the broadcast intermediate X[:, None, :] - Y[None, :, :] need for n = 50,000, m = 1,000, d = 512 in float32?**
+   A. about 100 MB
+   B. about 1 GB
+   C. about 102 GB
+   D. none — broadcasting never allocates
+   Answer: C — The stretched inputs are views, but the subtraction materialises its result: n × m × d = 2.56 × 10¹⁰ floats × 4 bytes = 102 GB. Broadcasting avoids copying the inputs; it does not avoid allocating the output.
+
+---
+
+- numpy's own statement of the rule: "Broadcasting" in the numpy user guide (numpy.org/doc/stable/user/basics.broadcasting.html).
+- `np.einsum` names every axis and makes the contraction explicit: `np.einsum('btc,cd->btd', x, W)` is the `x @ W` above. M1.L3 writes attention with it.
+- Strides: `x.strides` shows how many bytes to skip per step along each axis. A broadcast axis has stride 0 — that is the whole trick.
+# T0.L3 — The Cost of a Matmul
+
+_Track T0: The Training Contract · ~17 min · trainingspace_
+
+> Training a model is, to a first approximation, a very long list of matrix multiplications. Count their FLOPs and their bytes and you can predict whether a GPU will be busy or waiting — before you run anything.
+In a transformer, more than 95% of the arithmetic is matrix multiplication: every linear layer, every attention projection, the output layer. Everything else — activations, normalisation, softmax — is cheap to compute but, as you will see, not cheap to *move*. So the cost model of training starts with one operation.
+
+## Counting the FLOPs
+
+`C = A @ B` with `A` of shape `(m, k)` and `B` of shape `(k, n)`. Each of the **m·n** outputs is a dot product of length **k**: k multiplies and k adds (k − 1, but nobody counts that closely). So
+
+```
+FLOPs(matmul) = 2 · m · k · n
+```
+
+A FLOP here is one floating-point add or multiply. A linear layer applied to a batch of B vectors is the same matmul with m = B: **2·B·d_in·d_out** FLOPs. P1.L4 builds the famous `6·N·D` training estimate out of exactly this term.
+
+---
+
+- **85 MFLOP/s** — Python loop dot (sum(a*b for a, b in zip(x, y)) on 10⁶ floats, CPython 3.12, reference laptop)
+- **21 GFLOP/s** — numpy dot (the same 10⁶-element dot product with x @ y)
+- **2.0 TFLOP/s** — numpy matmul (2048 × 2048 float32 matmul, numpy 2.5 on an Apple M5 (10 cores))
+- **~24,000×** — loop → matmul (2.0 TFLOP/s ÷ 85 MFLOP/s, same machine)
+
+---
+
+Those are measurements from the reference laptop. The spread is the whole argument for writing training code with arrays: the same multiply-adds run 24,000 times faster when they are expressed as one matmul than as a Python loop. But notice also that the numpy **dot product** is 100× slower than the numpy **matmul**, even though both are compiled code. That gap is not about Python. It is about bytes.
+
+## Counting the bytes
+
+To multiply, the processor has to read A and B from memory and write C back. If each element crosses memory once:
+
+```
+bytes(matmul) ≈ bytes_per_element · (m·k + k·n + m·n)
+```
+
+The ratio of the two counts is the **arithmetic intensity** — FLOPs per byte moved:
+
+| operation | FLOPs | bytes (bf16) | intensity |
+|---|---|---|---|
+| dot product, length k | 2k | 2·2k | **0.5** |
+| matrix × vector, (n, n)·(n,) | 2n² | ≈ 2n² | **≈ 1** |
+| square matmul, n = 4096 | 2n³ | 2·3n² | **n/3 ≈ 1365** |
+| linear layer, batch B, d ≫ B | 2·B·d² | ≈ 2d² | **≈ B** |
+
+A square matmul does n/3 operations for every byte it touches; a dot product does half an operation. Lab 00's `arithmetic_intensity` computes this column.
+
+---
+
+## The roofline: which limit you hit
+
+Every processor has two speed limits: a peak compute rate (FLOP/s) and a peak memory bandwidth (bytes/s). Divide them and you get its **ridge point** — the intensity at which the two limits meet:
+
+- below the ridge an operation is **memory-bound**: the arithmetic units wait for data, and FLOP/s = intensity × bandwidth;
+- above it the operation is **compute-bound**: memory keeps up, and FLOP/s is the peak.
+
+On the reference laptop the matrix-vector product above ran at **36 GFLOP/s while moving 72.6 GB/s** — bandwidth-limited, with the arithmetic units mostly idle. The square matmul ran at 2,000 GFLOP/s. Same library, same cores, 55× apart, entirely because of intensity.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** An H100's ridge point
+>
+> An NVIDIA H100 SXM is specified at about **989 TFLOP/s** of dense bf16 tensor-core compute (the often-quoted 1,979 assumes 2:4 sparsity) and **3.35 TB/s** of HBM3 bandwidth, with 80 GB of memory. The ridge point is therefore
+> 
+> 989 × 10¹² ÷ 3.35 × 10¹² ≈ **295 FLOP per byte**.
+> 
+> An operation needs about 300 FLOPs per byte moved before the GPU's compute is the bottleneck. By the table above, a linear layer reaches that only when it processes **about 300 rows at once**.
+>
+> Sources: https://www.nvidia.com/en-us/data-center/h100/ · https://portal.mlcloud.uni-tuebingen.de/user-guide/_specs/gpu/h100/
+
+---
+
+_fig 1 — the roofline_
+
+Components: dot product (intensity 0.5) · matrix × vector (intensity ≈ 1) · ridge point (≈ 295 on H100) · square matmul (intensity n/3) · memory roof (FLOP/s = I × bandwidth) · compute roof (FLOP/s = peak)
+
+Steps:
+1. Plot achievable FLOP/s against arithmetic intensity. At low intensity the line rises with slope = memory bandwidth: every extra FLOP per byte is free speed.
+2. A dot product and a matrix-vector product sit at the far left. They run at a tiny fraction of peak no matter how fast the arithmetic units are.
+3. At the ridge point — peak FLOP/s divided by bandwidth — the slope meets the flat compute roof. On an H100 that is about 295 FLOPs per byte.
+4. Large matmuls live to the right of the ridge, at the compute roof. Training is fast because it batches enough tokens to push its matmuls here.
+
+---
+
+## Why this decides how models are trained
+
+**Training batches tokens to climb the roofline.** A training step pushes B sequences of T tokens through every linear layer at once — the "m" of each matmul is B·T, typically hundreds of thousands. Intensity ≈ B·T, far right of the ridge: training matmuls are compute-bound, which is why training efficiency is quoted as a fraction of peak FLOP/s (MFU, P1.L4).
+
+**The cheap operations are the expensive ones.** A LayerNorm or a GELU does a handful of FLOPs per element and reads and writes every element: intensity around 1. On a GPU it runs at memory speed, so a model's elementwise operations can take a noticeable share of step time while doing well under 1% of its FLOPs. **Kernel fusion** — doing several elementwise operations in one pass over memory — exists to fix exactly this, and it is what `torch.compile` and FlashAttention do (P1.L2, M1.L3).
+
+**Generating text is the opposite regime.** Producing one token at a time multiplies every weight matrix by a single vector: intensity ≈ 1, deep in memory-bound territory. That is a serving problem, not a training one; this course stays on the training side of the roofline.
+
+---
+
+> **[analogy]** You already know this trade. One `INSERT` per row spends its time on round trips; a batch of 1,000 rows in one statement amortises the fixed cost of moving data and runs near the disk's real throughput. Arithmetic intensity is the same idea with "round trip" replaced by "bytes moved from memory": batch enough work per byte and the expensive resource is finally the bottleneck.
+
+---
+
+**Q1. How many FLOPs does one linear layer with d_in = 4096 and d_out = 11008 cost for a batch of 8 sequences of 2048 tokens (forward only)?**
+   A. about 9.2 × 10⁷
+   B. about 1.5 × 10¹²
+   C. about 7.4 × 10¹¹
+   D. about 2.9 × 10¹³
+   Answer: B — The batch flattens to m = 8 × 2048 = 16,384 rows. 2 · m · k · n = 2 × 16,384 × 4,096 × 11,008 ≈ 1.48 × 10¹². The tempting 7.4 × 10¹¹ forgets the factor of 2: every term of a dot product is a multiply AND an add.
+
+**Q2. A teammate profiles a step and finds LayerNorm takes 8% of the time but under 0.5% of the FLOPs. What is the right reading?**
+   A. The profiler is wrong — FLOPs are time
+   B. LayerNorm is memory-bound: it reads and writes every activation for a few FLOPs each, so it runs at bandwidth speed, not compute speed — fusing it with neighbouring operations is the fix
+   C. LayerNorm should be removed from the model
+   D. The GPU has a slow LayerNorm unit
+   Answer: B — Elementwise and reduction operations have intensity near 1, so their time is set by bytes moved, not by FLOPs. Their share of time can be many times their share of FLOPs. Fusion — computing several of them in one pass over memory — reduces the bytes, which is the cost that matters.
+
+**Q3. On an H100 (ridge ≈ 295 FLOP/byte in bf16), roughly how many rows must a (rows, 8192) × (8192, 8192) matmul process before it stops being memory-bound?**
+   A. about 3
+   B. about 30
+   C. about 300
+   D. about 30,000
+   Answer: C — With d ≫ rows, bytes ≈ 2·d² (the weight matrix dominates) and FLOPs = 2·rows·d², so intensity ≈ rows. It crosses the ridge at about 295 rows. Fewer rows and the GPU waits on HBM to stream the weights; this is why training uses large token batches.
+
+---
+
+- Williams, Waterman and Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures" (CACM, 2009) — the original roofline paper.
+- Horace He, "Making Deep Learning Go Brrrr From First Principles" (horace.io/brrr_intro.html) — compute, memory and overhead as the three regimes of a training step.
+- Measure your own machine: time `a @ b` for n = 64, 512, 2048 and `a @ v` for a matrix-vector product, and compute FLOP/s = 2·n³ / seconds. Your ridge point is the ratio of the best matmul rate to the matrix-vector bandwidth.
+# T0.L4 — Where the Memory Goes
+
+_Track T0: The Training Contract · ~16 min · trainingspace_
+
+> A 7-billion-parameter model is 14 GB to serve and 112 GB to train — before a single activation is stored. The other 98 GB are gradients and optimiser state, and knowing which is which is how every memory-saving technique in D1 is designed.
+To **run** a model you need its weights. To **train** it you need the weights and everything the four-step loop (T0.L1) creates along the way. Count them for one parameter, in the standard recipe — mixed-precision training with the Adam optimiser:
+
+| what | why it exists | dtype | bytes |
+|---|---|---|---|
+| weight | the parameter, used in forward and backward | bf16 | 2 |
+| gradient | step 3's output, one per parameter | bf16 | 2 |
+| master weight | the update `p −= lr·g` is too small to register in bf16 (P1.L3) | fp32 | 4 |
+| Adam first moment *m* | running average of the gradient (O1.L3) | fp32 | 4 |
+| Adam second moment *v* | running average of the squared gradient | fp32 | 4 |
+| **total** | | | **16** |
+
+Twelve of the sixteen bytes exist only because we are training. Lab 00's `training_bytes_per_param` is this table.
+
+---
+
+- **14 GB** — 7B weights, bf16 (7 × 10⁹ × 2 bytes — enough to serve it)
+- **112 GB** — 7B training state (7 × 10⁹ × 16 bytes, no activations)
+- **80 GB** — one H100 (HBM3 capacity of an H100 SXM (T0.L3 vendor note))
+- **5 B** — params per 80 GB (80 × 10⁹ ÷ 16 — the largest model whose training state fits, with zero room for activations)
+
+---
+
+Variants exist — some recipes keep fp32 gradients (18 bytes), some keep no master copy and use stochastic rounding (12), some optimisers keep one moment instead of two — but 16 is the number to carry into a design review. It is the one the ZeRO paper uses, and it is why "the model is 14 GB" and "the model fits on a GPU" are different claims.
+
+## The fourth consumer: activations
+
+The backward pass needs the intermediate values the forward pass computed — the input to every matmul, the output of every nonlinearity — because local derivatives are functions of them (A1.L2). So the forward pass **stores** them, and they live until backward consumes them. That is activation memory, and unlike the 16 bytes it scales with the batch:
+
+```
+activations ∝ layers × batch × sequence length × hidden size   (+ a sequence² term for naive attention)
+```
+
+---
+
+> **[vendor snapshot — verified 2026-10]** How big activations get: the Megatron estimate
+>
+> Korthikanti et al. (2022) estimate the activation memory of one transformer layer, in 16-bit, as about
+> 
+> **s·b·h·(34 + 5·a·s / h)** bytes
+> 
+> for sequence length *s*, micro-batch *b*, hidden size *h* and *a* attention heads. For a 7B-shaped model (h = 4096, a = 32, 32 layers) at s = 2048, b = 1:
+> 
+> - the 34·s·b·h part: 34 × 2048 × 4096 = **0.29 GB** per layer;
+> - the 5·a·s²·b part (the stored attention matrix): 5 × 32 × 2048² = **0.67 GB** per layer;
+> - × 32 layers ≈ **31 GB for a single sequence**.
+> 
+> FlashAttention (M1.L3) never stores the s² attention matrix, which removes the second term: ≈ 9 GB per sequence. Activation recomputation (D1.L6) trades FLOPs to shrink the rest.
+>
+> Sources: https://arxiv.org/abs/2205.05198
+
+---
+
+_fig 1 — memory over one training step_
+
+Components: static: 16 B/param (weights · grads · master · m · v) · forward (activations pile up) · peak (end of forward) · backward (activations freed layer by layer) · optimizer step (reads m, v, master) · next step (back to static only)
+
+Steps:
+1. Between steps, memory holds the static training state: 16 bytes per parameter, independent of batch size. For 7B parameters that is 112 GB.
+2. The forward pass runs layer by layer and keeps each layer's inputs for the backward pass. Memory climbs with every layer and every token in the batch.
+3. Peak memory is at the end of the forward pass: static state plus every stored activation. Out-of-memory errors almost always happen here or early in backward.
+4. Backward walks the layers in reverse, consuming each layer's stored activations and freeing them while gradients fill in.
+5. The optimiser step reads the gradients, both Adam moments and the master weights, writes new weights, and memory returns to the static floor for the next step.
+
+---
+
+## What you can trade
+
+Every memory technique in this course removes one row of the table, or the activation term, and pays for it with something else:
+
+| technique | removes | pays with | lesson |
+|---|---|---|---|
+| smaller micro-batch + gradient accumulation | activations | more, smaller steps — same maths | P1.L2 |
+| activation checkpointing | most activations | ~33% more compute (forward run twice) | D1.L6 |
+| ZeRO-1 / -2 / -3, FSDP | optimiser state, grads, weights — sharded over N GPUs | communication | D1.L3 |
+| LoRA | grads and optimiser state for frozen weights | adapts a low-rank slice only | F1.L3 |
+| 8-bit optimisers | half of *m* and *v* | quantisation error in the moments | P1.L3 |
+
+None of them is free. A design review that says "we'll just use FSDP" without saying what it costs in bandwidth is missing half the sentence.
+
+---
+
+> **[isomorphism]** You size a JVM heap as "steady-state live set + headroom for the allocation burst of one request". Training memory has the same shape: the **16 bytes per parameter** are the live set — always resident — and **activations** are the per-request burst, proportional to batch × sequence, allocated in the forward pass and released in the backward. OOM in training, like OOM in a service, is almost always the burst on top of a live set you forgot was already 80% of the heap.
+
+---
+
+**Q1. Your team has 8 H100s (80 GB each) and wants to fine-tune all weights of a 13B model with plain data parallelism (every GPU holds a full copy of everything). Will it fit?**
+   A. Yes — 13B in bf16 is 26 GB
+   B. Yes — 8 GPUs give 640 GB in total
+   C. No — each replica needs 13 × 10⁹ × 16 B = 208 GB of training state, and plain data parallelism puts all of it on every GPU
+   D. No — but only because of activations
+   Answer: C — 26 GB is the serving footprint. Training needs 16 bytes per parameter, 208 GB, and data parallelism replicates it on each device, so 640 GB of aggregate memory does not help. Sharding the state across the 8 GPUs (ZeRO-3/FSDP, D1.L3) brings it to 26 GB per GPU plus activations.
+
+**Q2. A run with micro-batch 16 runs out of memory at the end of the forward pass. Which change keeps the same effective batch and the same training maths while cutting peak memory?**
+   A. Halve the learning rate
+   B. Micro-batch 8 with 2 gradient-accumulation steps
+   C. Switch from Adam to SGD with momentum
+   D. Double the sequence length and halve the batch
+   Answer: B — Activations scale with the micro-batch; static state does not. Two micro-batches of 8, with gradients summed before one optimiser step, compute the same update as one batch of 16 at roughly half the activation memory. Changing the optimiser alters the maths; doubling the sequence length makes the attention term worse.
+
+**Q3. Which part of training memory does NOT grow when you double the batch size?**
+   A. Stored activations
+   B. The attention score matrices
+   C. Adam's two moment buffers
+   D. The inputs saved for each matmul's backward pass
+   Answer: C — The optimiser state is one entry per parameter — 8 bytes per parameter for m and v in fp32 — regardless of how many examples are in the batch. Everything the forward pass stores for the backward pass scales with batch size.
+
+---
+
+- Rajbhandari et al., "ZeRO: Memory Optimizations Toward Training Trillion Parameter Models" (2019, arxiv.org/abs/1910.02054) — section 3 is the 16-bytes-per-parameter accounting this lesson uses.
+- Korthikanti et al., "Reducing Activation Recomputation in Large Transformer Models" (2022) — the activation formula above, derived term by term.
+- In PyTorch, `torch.cuda.max_memory_allocated()` after one step on a GPU shows your peak; compare it with 16 × parameters to see your activation share.
+# A1.L1 — Derivatives as Sensitivity
+
+_Track A1: Autograd from Scratch · ~14 min · trainingspace_
+
+> Forget the calculus class. A derivative answers one engineering question — if I nudge this input, how much does the output move? — and you can measure it with two function calls.
+The **derivative** of a function `f` at a point `x` is the ratio
+
+```
+how much f(x) changes
+---------------------   for a very small nudge
+  how much x changed
+```
+
+That is all. If `f'(x) = 6`, nudging `x` up by 0.001 moves `f` up by about 0.006. If it is −6, `f` moves *down* by about 0.006. If it is 0, `f` does not care about small changes to `x` at all. For training, read **f** as the loss and **x** as one parameter: the derivative says how sensitive the loss is to that parameter, and its sign says which way is downhill.
+
+## Measure it
+
+You do not need a formula to get a derivative. Nudge and measure:
+
+```python
+def forward_diff(f, x, h=1e-3):
+    return (f(x + h) - f(x)) / h
+
+def central_diff(f, x, h=1e-3):
+    return (f(x + h) - f(x - h)) / (2 * h)
+```
+
+For `f(x) = x³` at `x = 2` the exact answer is `3x² = 12`. Measured in float64 on the reference laptop:
+
+---
+
+| step h | one-sided | error | central | error |
+|---|---|---|---|---|
+| 10⁻¹ | 12.61 | 6.1 × 10⁻¹ | 12.01 | 1.0 × 10⁻² |
+| 10⁻³ | 12.006001 | 6.0 × 10⁻³ | 12.000001 | 1.0 × 10⁻⁶ |
+| 10⁻⁵ | 12.0000600 | 6.0 × 10⁻⁵ | 12.0000000002 | 2.1 × 10⁻¹⁰ |
+| 10⁻⁸ | 11.99999993 | 7.3 × 10⁻⁸ | 11.99999988 | 1.2 × 10⁻⁷ |
+| 10⁻¹² | 12.00107 | 1.1 × 10⁻³ | 12.00107 | 1.1 × 10⁻³ |
+
+Two lessons are in that table.
+
+**Central differences converge much faster.** The one-sided error shrinks in proportion to *h*; the central error in proportion to *h²*, because the curvature errors on the two sides cancel. At h = 10⁻³ that is the difference between three correct digits and six.
+
+**Smaller is not always better.** Below about 10⁻⁵ the error grows again. `f(x + h)` and `f(x − h)` agree in almost every digit, and subtracting two nearly equal floats leaves mostly rounding noise (float64 carries about 16 significant digits). At h = 10⁻¹² the noise dominates. In float32 — 7 digits — the sweet spot is near 10⁻³, which is why gradient checks run in float64 (A1.L5).
+
+---
+
+- **∝ h** — one-sided error (the first neglected Taylor term is (h/2)·f″(x))
+- **∝ h²** — central error (the f″ terms cancel; the next is (h²/6)·f‴(x))
+- **~10⁻⁵** — best h, float64 (measured on x³ at 2: error 2 × 10⁻¹⁰)
+- **2 calls** — per parameter (central differences need f(x+h) and f(x−h) — for every parameter separately)
+
+---
+
+## Many inputs: partial derivatives and the gradient
+
+A loss depends on every parameter at once. A **partial derivative** `∂L/∂w` is the same nudge-and-measure question asked about one input while the others are held still. Collect one partial derivative per parameter and you have the **gradient**, written ∇L: a vector with exactly as many entries as the model has parameters, the same shape as the parameters themselves.
+
+The gradient has one more property that makes it the right thing to follow: of all directions you could move the parameters, **−∇L is the one in which the loss falls fastest** for a small step. That is why the update in T0.L1 is `p −= lr · g`.
+
+## Where T0.L1's formulas came from
+
+The line model's loss for one point is `(w·x + b − y)²`. Two rules you can check numerically do all the work:
+
+- the derivative of u² with respect to u is **2u**;
+- if `u` depends on `w`, multiply by how much `u` moves per unit `w` — here `x`. (That multiplication is the **chain rule**, and A1.L2 is entirely about it.)
+
+So ∂/∂w of `(w·x + b − y)²` is `2·(w·x + b − y)·x`, and ∂/∂b is `2·(w·x + b − y)·1`. Average over the three points and you have T0.L1's `dL/dw` and `dL/db`.
+
+---
+
+```python
+xs, ys = [1, 2, 3], [3, 5, 7]
+
+def loss(w, b):
+    return sum((w * x + b - y) ** 2 for x, y in zip(xs, ys)) / len(xs)
+
+w, b, h = 0.0, 0.0, 1e-5
+numeric_dw = (loss(w + h, b) - loss(w - h, b)) / (2 * h)
+formula_dw = 2 / len(xs) * sum((w * x + b - y) * x for x, y in zip(xs, ys))
+print(numeric_dw, formula_dw)   # -22.6666..., -22.6666...
+```
+
+---
+
+> **[warning]** Nudging is exact enough, simple, and needs no calculus. It is also hopeless at scale: two loss evaluations **per parameter**. A model with 10⁸ parameters would need 2 × 10⁸ forward passes for one gradient. The next lesson shows how the chain rule gets all 10⁸ partial derivatives for the price of roughly one extra pass — and nudging becomes what it is best at: checking that those derivatives are right.
+
+---
+
+**Q1. For one parameter, ∂L/∂w = −40 and for another ∂L/∂v = 0.01. What do these tell you?**
+   A. w should be decreased; v barely matters right now
+   B. w should be increased a lot; v barely affects the loss at the current point
+   C. w is a worse parameter than v
+   D. The learning rate for w should be 4,000× smaller
+   Answer: B — A negative derivative means increasing w decreases the loss, so the step p −= lr·g increases w. The magnitude 40 says the loss is very sensitive to w here. A derivative of 0.01 says small changes to v hardly move the loss at this point — not that v is useless in general.
+
+**Q2. A colleague checks a float32 gradient with forward differences at h = 1e-8 and finds wild disagreement. Most likely cause?**
+   A. The analytic gradient is wrong
+   B. h is far too small for float32: f(x+h) − f(x) is mostly rounding error with about 7 significant digits — use float64, central differences and h around 1e-5
+   C. Forward differences only work for linear functions
+   D. h should be negative
+   Answer: B — In float32, x + 1e-8 often equals x exactly for x of order 1, so the difference is zero or pure noise. Gradient checks are run in float64 with central differences, where h ≈ 1e-5 balances truncation error against rounding error.
+
+**Q3. What shape is the gradient of a scalar loss with respect to a weight matrix of shape (768, 3072)?**
+   A. a scalar
+   B. (3072, 768)
+   C. (768, 3072)
+   D. (768,)
+   Answer: C — There is one partial derivative per weight, so the gradient has exactly the parameter's shape: (768, 3072). This is the rule lab 02 checks for every operation — .grad always has the same shape as .data.
+
+---
+
+- 3Blue1Brown, *Essence of Calculus*, episodes 1–2 — the derivative as a ratio of nudges, drawn.
+- Why the central difference is second-order: write the Taylor series of f(x+h) and f(x−h) and subtract; the f″ terms cancel. Two lines of algebra.
+- Run the table above in float32 (`np.float32`) and find where the error bottoms out.
+# A1.L2 — The Chain Rule as a Graph
+
+_Track A1: Autograd from Scratch · ~18 min · trainingspace_
+
+> Every gradient a framework computes is the chain rule applied by walking a graph backwards. Once you see the walk, backpropagation stops being an algorithm to memorise and becomes bookkeeping.
+## The chain rule, as a sentence
+
+If `L` depends on `d`, and `d` depends on `a`, then
+
+```
+∂L/∂a = ∂L/∂d · ∂d/∂a
+```
+
+In words: how much L moves per unit of `a` is how much L moves per unit of `d`, times how much `d` moves per unit of `a`. Sensitivities **multiply along a path**. And when `a` reaches L by several paths, the contributions **add**. Those two rules — multiply along paths, add across paths — are the whole of backpropagation.
+
+## Write the computation as a graph
+
+Take `L = (a·b + c)²` with `a = 2`, `b = −3`, `c = 10`. Break it into one operation per node:
+
+```
+e = a · b      = −6
+d = e + c      =  4
+L = d²         = 16
+```
+
+Every node knows its **local derivatives** — how its output moves with each of its inputs — from its own operation alone, without knowing anything about the rest of the graph:
+
+| node | local derivatives |
+|---|---|
+| `e = a·b` | ∂e/∂a = b = −3, ∂e/∂b = a = 2 |
+| `d = e + c` | ∂d/∂e = 1, ∂d/∂c = 1 |
+| `L = d²` | ∂L/∂d = 2d = 8 |
+
+---
+
+_fig 1 — the backward walk for L = (a·b + c)²_
+
+Components: a = 2 (grad −24) · b = −3 (grad 16) · c = 10 (grad 8) · e = a·b (−6 · grad 8) · d = e + c (4 · grad 8) · L = d² (16 · grad 1)
+
+Steps:
+1. The forward pass computes values left to right and every node remembers its inputs: e = −6, d = 4, L = 16.
+2. Seed the walk: the derivative of L with respect to itself is 1. Then L = d² sends 1 × 2d = 8 to d.
+3. d = e + c has local derivative 1 for both inputs, so an addition simply copies its incoming gradient, 8, to e and to c. c is finished: ∂L/∂c = 8.
+4. e = a·b multiplies the incoming 8 by the OTHER input: a receives 8 × b = −24 and b receives 8 × a = 16. Every leaf now holds ∂L/∂leaf.
+
+---
+
+Check one answer by nudging (A1.L1): `L(a = 2.001) = (2.001·(−3) + 10)² = 3.997² = 15.976`, so L fell by 0.024 when `a` rose by 0.001 — a derivative of −24. The walk got it without any nudging.
+
+## The rule of the walk
+
+Each node, when its turn comes, receives **one number** — ∂L/∂(its output), called the upstream gradient — and does one thing:
+
+```
+for each input:  input.grad += upstream_grad × local_derivative(input)
+```
+
+The `+=` is the "add across paths" rule: a value used twice gets gradient from both uses. The order of visits matters: a node may only run once **every** node that consumes its output has run, or its upstream gradient is incomplete. That order is a **reverse topological sort** of the graph — lab 01 has you build it, without recursion.
+
+---
+
+_You already walk dependency graphs_
+
+- **a build system (make, Bazel)** (targets run only after everything they depend on: topological order) ≡ **the forward pass** (nodes compute only after their inputs: topological order)
+- **cost attribution in a call tree** (a function's cost is pushed down to callees in proportion to the calls, and summed when shared) ≡ **the backward pass** (a node's gradient is pushed to its inputs in proportion to local derivatives, and summed when shared)
+
+---
+
+## Why reverse, not forward
+
+You could also walk the graph **forwards**: pick one input, push "∂·/∂a = 1" through the graph, and get ∂L/∂a at the end. That is **forward-mode** differentiation, and it gives one input's sensitivity per pass. **Reverse mode** gives every input's sensitivity for one output per pass.
+
+Training has exactly one output — the scalar loss — and up to billions of inputs. Forward mode would need a pass per parameter (no better than nudging); reverse mode needs one. That asymmetry is why every deep-learning framework is a reverse-mode autograd engine.
+
+**What it costs.** Each node does about as much work in its backward step as in its forward step, and usually more: a matmul `Y = X·W` needs two matmuls going back — one for ∂L/∂X and one for ∂L/∂W (A1.L4). So:
+
+```
+backward ≈ 2 × forward       one training step ≈ 3 × forward
+```
+
+That "3" becomes the 6 in **6·N·D**, the training-FLOPs formula in P1.L4: a forward pass is 2 FLOPs per parameter per token, and the step is three times that.
+
+**What it stores.** The local derivatives need the forward values — `e = a·b` needs `a` and `b` to send gradient back. Reverse mode therefore keeps every intermediate value alive until the backward walk reaches it. That is the activation memory of T0.L4: the price of reverse mode, paid in bytes.
+
+---
+
+**Q1. y = x·x. Using the walk (not calculus), what gradient does x receive, and why?**
+   A. x, because one input gets the other input's value
+   B. 2x: the multiply node sends upstream × (other input) to each input slot; both slots are x, and the two contributions add
+   C. x², because that is the output
+   D. 1, because x is a leaf
+   Answer: B — The multiply node sends upstream·b to a and upstream·a to b. Here a and b are the same node, so x receives x + x = 2x. Overwriting instead of accumulating (= instead of +=) gives x — the most common bug in a hand-written engine, and lab 01's "accumulates" check.
+
+**Q2. A model has 10⁹ parameters and one scalar loss. Why does training use reverse mode rather than forward mode?**
+   A. Forward mode is numerically unstable
+   B. Reverse mode gives all 10⁹ partial derivatives in one backward pass; forward mode gives one input's derivative per pass, so it would need 10⁹ passes
+   C. Forward mode cannot handle matrix multiplication
+   D. Reverse mode uses less memory
+   Answer: B — The cost of each mode scales with the side of the function it starts from: forward mode with the number of inputs, reverse mode with the number of outputs. Training has one output. Reverse mode does pay in memory — it must store forward values — so "uses less memory" is the opposite of the truth.
+
+**Q3. Why does a training step cost roughly three forward passes of compute?**
+   A. The optimiser step costs two forward passes
+   B. The backward pass computes gradients for both a layer's inputs and its weights — about two matmuls for every one in the forward pass
+   C. Gradients are computed in float64
+   D. The loss is evaluated three times
+   Answer: B — For Y = X·W the backward pass needs ∂L/∂X = G·Wᵀ (to keep propagating) and ∂L/∂W = Xᵀ·G (to update the weight): two matmuls of the same size as the forward one. Forward + backward ≈ 1 + 2 = 3. The optimiser step is elementwise and comparatively negligible in FLOPs.
+
+---
+
+- Christopher Olah, "Calculus on Computational Graphs: Backpropagation" (colah.github.io) — the forward- vs reverse-mode argument with pictures.
+- Baydin et al., "Automatic Differentiation in Machine Learning: a Survey" (JMLR, 2018) — the general theory, including forward mode with dual numbers.
+- Next: A1.L3 turns this walk into about 100 lines of Python.
+# A1.L3 — A Scalar Engine
+
+_Track A1: Autograd from Scratch · ~20 min · trainingspace_
+
+> An autograd engine is a number that remembers how it was made. Give every value a list of parents and a closure that knows its local derivative, walk the graph backwards once, and you have the core of PyTorch in about a hundred lines.
+A1.L2 walked a graph by hand. To make a program walk it, every intermediate value needs to carry three things beyond its number:
+
+1. **`grad`** — a slot for ∂L/∂(this value), starting at 0.
+2. **`_prev`** — the values it was computed from: its edges in the graph.
+3. **`_backward`** — a closure that, when called, pushes `self.grad` into its parents' `grad` using the local derivatives of the operation that made it.
+
+The trick is that you never build the graph explicitly. Overload `+`, `*` and friends so that every operation creates a new value with those three fields filled in, and **running the forward pass records the graph as a side effect**. This is the design popularised by Andrej Karpathy's *micrograd*, and it is, in miniature, how PyTorch's autograd works.
+
+---
+
+```python
+class Value:
+    def __init__(self, data, _children=(), _op=""):
+        self.data = float(data)
+        self.grad = 0.0
+        self._backward = lambda: None     # leaves have nothing to push
+        self._prev = tuple(_children)
+        self._op = _op
+
+    def __mul__(self, other):
+        other = other if isinstance(other, Value) else Value(other)
+        out = Value(self.data * other.data, (self, other), "*")
+
+        def _backward():                  # runs later, during the walk
+            self.grad += other.data * out.grad
+            other.grad += self.data * out.grad
+
+        out._backward = _backward
+        return out
+```
+
+---
+
+Read the closure carefully, because every operation you write in lab 01 has the same three ingredients:
+
+- **`out.grad`** is the upstream gradient — by the time this runs, every consumer of `out` has already added its share.
+- **`other.data`** is the local derivative of `a·b` with respect to `a`. It is a *forward* value, captured by the closure — the stored activation of T0.L4.
+- **`+=`** accumulates, so a value used twice gets both contributions.
+
+Then `backward()` itself is three steps:
+
+```python
+def backward(self):
+    order = topological_order(self)   # every node after all of its inputs
+    self.grad = 1.0                   # dL/dL
+    for node in reversed(order):      # consumers before producers
+        node._backward()
+```
+
+---
+
+> **[segfault]** **The overwrite.** Writing `self.grad = other.data * out.grad` passes every simple test — until a value is used twice. `y = x·x + x` at x = 3 should give 7; the overwrite gives 1 or 3 depending on visit order. Lab 01's `accumulates` check is exactly this expression.
+> 
+> **The recursion.** The obvious topological sort is a recursive depth-first search. Python's default recursion limit is 1,000 frames, and a training graph is thousands of nodes deep: one node per operation per layer per token. Lab 01's `deep-graph` check builds a 5,000-node chain. Use an explicit stack: push a node, push its children, emit the node when you come back to it.
+
+---
+
+## A neuron on top
+
+Once `Value` exists, a neuron is ordinary Python — the engine does not know or care that it is part of a neural network:
+
+```python
+def neuron(weights, bias, xs):
+    return sum((w * x for w, x in zip(weights, xs)), bias).tanh()
+```
+
+Stack neurons into layers and layers into an MLP, compute a loss, call `loss.backward()`, and every weight's `.grad` holds its partial derivative. Then the step from T0.L1 — and one easily forgotten line:
+
+```python
+for p in params:
+    p.data -= lr * p.grad
+    p.grad = 0.0            # gradients accumulate across backward() calls too
+```
+
+PyTorch has the same semantics, which is why every PyTorch loop calls `optimizer.zero_grad()`. Forgetting it is the same bug as the overwrite, inverted: gradients from step 1 leak into step 2.
+
+---
+
+- **337** — parameters (an MLP 2 → 16 → 16 → 1 with tanh, built from Value)
+- **68,140** — graph nodes (one forward pass over 100 examples — every add, multiply and tanh is a Python object)
+- **148 ms** — forward + backward (118 ms forward, 30 ms backward on the reference laptop)
+- **0.4 MFLOP/s** — useful throughput (60,800 matmul FLOPs ÷ 148 ms — about 5 million times slower than numpy's matmul (T0.L3))
+
+---
+
+## Why this is not how you train a model
+
+The engine is correct and hopeless. Each scalar multiply allocates a Python object, a tuple and a closure; the forward pass spends most of its 118 ms creating 68,140 of them. Useful arithmetic runs at 0.4 MFLOP/s — five million times below what a numpy matmul achieves on the same laptop.
+
+The fix is not a faster scalar engine. It is to make each node hold an **array** and each operation a whole matmul, so that one graph node does a million FLOPs instead of one, and the per-node Python overhead disappears into the noise. Same graph, same walk, same `+=` — lab 02 builds it, and A1.L4 works out the local derivatives of array operations, which is where the new difficulty lives: shapes.
+
+---
+
+**Hands-on lab 01: An Autograd Engine in 100 Lines** (graded in your browser) — Write the backward closures for +, ×, ** and four nonlinearities, then an iterative backward(). The checks include the reuse bug, a diamond-shaped graph that needs true reverse topological order, a 5,000-node chain, and a two-layer network checked against central differences.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/micrograd
+
+---
+
+**Q1. Your engine passes every test except one: a node used by two consumers gets the gradient of only one of them. Which line is wrong?**
+   A. self.grad = 1.0 in backward()
+   B. A _backward closure assigns (=) to an input's .grad instead of accumulating (+=)
+   C. The topological sort visits leaves first
+   D. The forward value is stored as float instead of int
+   Answer: B — Each consumer's closure contributes its share to the shared input; with = the last one to run overwrites the others. Seeding self.grad = 1.0 on the output is correct, and a topological order that lists leaves first is exactly what reversed() needs.
+
+**Q2. Why must _backward closures run in REVERSE topological order?**
+   A. It is faster
+   B. A node may only push gradient to its inputs once its own .grad is complete — i.e. after every node that consumes it has pushed its contribution
+   C. Python requires closures to run in reverse creation order
+   D. Forward order would compute second derivatives
+   Answer: B — A node's _backward multiplies its out.grad into its inputs. If it runs before a later consumer has added its share to out.grad, the inputs receive an incomplete gradient and nothing corrects it afterwards. Reverse topological order guarantees every consumer has run first. Lab 01's topo-order check builds a graph where any other order gives the wrong answer.
+
+**Q3. A training loop calls loss.backward() every step but never resets .grad. What happens?**
+   A. Nothing — backward() overwrites old gradients
+   B. Each step's gradient is the sum of all previous steps' gradients, so updates grow and point increasingly in stale directions
+   C. The graph is rebuilt, so gradients are fresh
+   D. Python raises an error
+   Answer: B — Parameters are long-lived leaves; their .grad slot accumulates by design, across backward() calls as well as within one. Without a reset, step n applies the sum of n gradients. That is why PyTorch loops call optimizer.zero_grad() — and why gradient accumulation (P1.L2) is just "do not zero for k micro-batches" on purpose.
+
+---
+
+- Andrej Karpathy, *micrograd* (github.com/karpathy/micrograd) and the lecture "The spelled-out intro to neural networks and backpropagation" — the engine lab 01 is shaped after.
+- PyTorch's autograd works the same way at array granularity: every tensor produced by an operation carries a `grad_fn` (its `_backward`) whose `next_functions` are its `_prev`. Print `loss.grad_fn.next_functions` on any PyTorch loss and walk it.
+- Stretch goal after lab 01: add a `Neuron`, `Layer` and `MLP` class and train on four XOR points until the loss is below 0.01.
+# A1.L4 — Tensor Autograd
+
+_Track A1: Autograd from Scratch · ~21 min · trainingspace_
+
+> Put a whole array in each graph node and the engine gets 1,700× faster. The price is that every local derivative must now get its shape right — and the rule that does it is: the gradient has the shape of the thing it is the gradient of.
+Lab 01's engine made one node per scalar operation. Lab 02 keeps the graph, the topological walk and the `+=` exactly as they were, and changes one thing: a node's `data` and `grad` are numpy arrays. The same MLP that took 148 ms per forward-and-backward on the scalar engine takes **0.087 ms** on the array engine on the reference laptop — about 1,700× — because the graph shrinks from 68,140 nodes to 27 and each node is a compiled numpy call.
+
+Everything that is hard about array autograd comes from one invariant:
+
+> **`x.grad` always has the same shape as `x.data`.**
+
+There is one partial derivative per element (A1.L1), so the gradient of a `(B, d)` activation is `(B, d)`, and the gradient of a `(d, d_out)` weight is `(d, d_out)`. Every rule below is the scalar rule from lab 01 plus whatever reshaping that invariant requires.
+
+---
+
+## Elementwise operations: the scalar rule, applied per element
+
+`relu`, `exp`, `tanh`, and `+` or `*` between same-shaped arrays act on each element independently, so the local derivative is applied element by element:
+
+| forward | backward (G = out.grad) |
+|---|---|
+| `out = x + y` | `x.grad += G`, `y.grad += G` |
+| `out = x * y` | `x.grad += G * y`, `y.grad += G * x` |
+| `out = relu(x)` | `x.grad += G * (x > 0)` |
+
+## Broadcasting: a stretch forward is a sum backward
+
+The bias add `x @ W + b` has `(B, d)` on the left and `(d,)` on the right. Broadcasting (T0.L2) used the single row `b` for all B rows. So each element of `b` influenced B outputs, and by the add-across-paths rule its gradient is the **sum** of those B upstream gradients:
+
+```python
+b.grad += G.sum(axis=0)        # (B, d) -> (d,)
+```
+
+In general: wherever the forward pass stretched an input — a prepended axis, or a size-1 axis — the backward pass sums the gradient along that axis back down to the input's shape. Lab 02 calls this `unbroadcast(grad, shape)` and it is used by every binary operation.
+
+---
+
+_fig 1 — the bias gradient is a column sum_
+
+Components: b ((d,)) · stretched (used by all B rows) · x·W + b ((B, d)) · G ((B, d) upstream) · sum over rows (axis=0) · b.grad ((d,))
+
+Steps:
+1. Forward: one bias vector of shape (d,) is broadcast across all B rows of the batch, so each bias element contributes to B different outputs.
+2. Backward: the upstream gradient G has the output's shape (B, d) — one sensitivity per output element, including the B copies each bias element fed.
+3. A value used B times receives B contributions, and contributions add. Summing G over the batch axis collects them into one number per bias element.
+4. The result has b's own shape, (d,). The invariant holds: a gradient always has the shape of the thing it is the gradient of.
+
+---
+
+## Matmul: let the shapes derive it
+
+`Y = X @ W` with X of shape `(B, k)`, W of shape `(k, n)`, so Y and its upstream gradient G are `(B, n)`. You need `X.grad` of shape `(B, k)` and `W.grad` of shape `(k, n)`, and each must be some product of G with the *other* input — exactly as in the scalar `a·b` rule. There is only one way to multiply those shapes together:
+
+```
+X.grad = G @ W.T      (B, n) @ (n, k) -> (B, k)   ✓
+W.grad = X.T @ G      (k, B) @ (B, n) -> (k, n)   ✓
+```
+
+This "dimension-matching" derivation is how practitioners remember it, and it is rigorous enough: working out ∂L/∂W_ij element by element gives `Σ_b X_bi · G_bj`, which is the (i, j) entry of `Xᵀ G`.
+
+Note what `W.grad = X.T @ G` needs: **X**, the layer's input from the forward pass. That is the stored activation again — and it is also where the sum over the batch happens. W is shared by every example, exactly like the bias, so its gradient sums over the B rows; the matmul does that sum for you.
+
+---
+
+```python
+def __matmul__(self, other):
+    out = Tensor(self.data @ other.data, (self, other), "@")
+
+    def _backward():
+        self.grad += out.grad @ other.data.T     # dX = G · Wᵀ
+        other.grad += self.data.T @ out.grad     # dW = Xᵀ · G
+
+    out._backward = _backward
+    return out
+```
+
+---
+
+## Reductions: the opposite of broadcasting
+
+`sum(axis=0)` turns `(B, d)` into `(d,)`; every input element contributed with weight 1 to one output element. So backward **broadcasts** the gradient back: each input element receives the upstream gradient of the output it was summed into. If `keepdims=False` removed the axis, put it back first with `np.expand_dims` so the broadcast lines up — otherwise a `(B,)` gradient aligns with the wrong axis of a `(B, d)` input (T0.L2's silent bug, in reverse). `mean` is `sum` times 1/n.
+
+Broadcast forward ↔ sum backward; sum forward ↔ broadcast backward. Those two dualities are most of the shape logic in every framework.
+
+## Fused operations
+
+Frameworks do not build cross-entropy out of `exp`, `sum`, `log` and indexing nodes. They write one node whose forward is the numerically stable log-softmax and whose backward is the closed form `(softmax − onehot) / N`, derived in O1.L2. Fewer nodes, fewer stored intermediates, no overflow. Lab 02 has you write that fused node; it is the loss for every language model in this course.
+
+---
+
+**Hands-on lab 02: Autograd for Arrays** (graded in your browser) — Write unbroadcast, the backward passes for +, ×, @, sum and relu, a fused stable cross-entropy and a gradient checker — then the lab trains a 2 → 16 → 3 MLP on your engine and expects the loss below 0.15.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/tensor-autograd
+
+---
+
+**Q1. In Y = X @ W, X is (64, 512) and W is (512, 128). What are the shapes of X.grad and W.grad, and what is W.grad computed from?**
+   A. X.grad (64, 128), W.grad (512, 512), from G alone
+   B. X.grad (64, 512) = G @ Wᵀ; W.grad (512, 128) = Xᵀ @ G — W's gradient needs the stored input X
+   C. X.grad (512, 64), W.grad (128, 512), both transposed
+   D. Both (64, 128), the shape of Y
+   Answer: B — Gradients take the shape of what they differentiate: (64, 512) and (512, 128). G is (64, 128); the only products that produce those shapes are G·Wᵀ and Xᵀ·G. The second needs X from the forward pass, which is why the input to every linear layer is kept until backward.
+
+**Q2. A hand-written layer adds a bias of shape (1, 256) to activations of shape (32, 256). Its backward does bias.grad += G. What goes wrong?**
+   A. Nothing — numpy handles it
+   B. bias.grad += G broadcasts (32, 256) into (1, 256) and numpy raises; the gradient must be summed over the batch axis with keepdims to (1, 256)
+   C. The bias gradient is 32× too small
+   D. The bias receives the gradient of only the first example
+   Answer: B — An in-place += cannot shrink the left operand: numpy raises "non-broadcastable output operand". The bias was stretched over 32 rows in the forward pass, so its gradient is G.sum(axis=0, keepdims=True). In frameworks without that error the same mistake can surface as a gradient for one row only — which is why unbroadcast is a function with its own tests.
+
+**Q3. Why does the array engine train the same MLP about 1,700× faster than the scalar engine, with identical gradients?**
+   A. Arrays use lower precision
+   B. The graph has 27 nodes instead of 68,140, so per-node Python overhead nearly vanishes and the arithmetic runs inside compiled numpy kernels
+   C. Array autograd skips the topological sort
+   D. numpy computes gradients symbolically
+   Answer: B — Both engines do the same walk with the same rules. The scalar one spends its time creating Python objects and calling closures, one per multiply. The array one does a whole matmul per node in compiled code. It is the same lesson as T0.L3's 24,000× loop-versus-matmul gap, applied to the backward pass.
+
+---
+
+- Justin Johnson, "Backpropagation for a Linear Layer" (Stanford CS231n notes) — the element-by-element derivation of dW = XᵀG.
+- PyTorch's `torch/csrc/autograd/FunctionsManual.cpp` and `tools/autograd/derivatives.yaml` list the backward formula of every operator; `sum_to_size` is its `unbroadcast`.
+- Stretch goal after lab 02: add `tanh`, `exp` and a batched matmul for 3-D inputs, and gradient-check each with your own `gradcheck`.
+# A1.L5 — Gradient Checking
+
+_Track A1: Autograd from Scratch · ~15 min · trainingspace_
+
+> A wrong backward pass does not crash. It trains — slower, worse, or not at all — and looks like a hyper-parameter problem for a week. Comparing it with two forward passes per element takes a minute and ends the argument.
+You now have two independent ways to get a gradient: the engine's backward pass, and nudging (A1.L1). The backward pass is fast and might be wrong. Nudging is slow and is right up to a known error. A **gradient check** compares them:
+
+```python
+for every element i of every input x:
+    x[i] += eps;  hi = f()
+    x[i] -= 2*eps; lo = f()
+    x[i] += eps                       # restore it!
+    numeric = (hi - lo) / (2 * eps)
+    compare numeric with x.grad[i]
+```
+
+Lab 02's `gradcheck` is this loop. The details that make it trustworthy are all in *how* you compare and *what precision* you compare in.
+
+---
+
+## Compare relative, not absolute
+
+A gradient element of 10⁻⁸ that is off by 10⁻⁸ is 100% wrong; one of 300 off by 10⁻⁶ is fine. So compare with a tolerance that scales with the size of the numbers:
+
+```
+|analytic − numeric|  ≤  atol + rtol · |numeric|        (lab 02: atol 1e-5, rtol 1e-3)
+```
+
+or report the **relative error** `max|a − n| / max(|a|, |n|)`. As a rule of thumb in float64: below 10⁻⁷ is correct, 10⁻⁷ to 10⁻⁴ deserves a look (a kink, or ε too big), above 10⁻² is a bug.
+
+## The measurements
+
+Checking the fused cross-entropy from lab 02 on a `(4, 5)` batch of logits, on the reference laptop:
+
+---
+
+| precision | ε | relative error | verdict |
+|---|---|---|---|
+| float64 | 10⁻² | 1.7 × 10⁻⁶ | truncation error from a large step |
+| float64 | 10⁻⁴ | **1.7 × 10⁻¹⁰** | correct |
+| float64 | 10⁻⁶ | 7.2 × 10⁻¹⁰ | correct |
+| float64 | 10⁻⁸ | 8.0 × 10⁻⁸ | rounding error starting to show |
+| float32 | 10⁻² | 3.2 × 10⁻⁵ | looks suspicious — is not |
+| float32 | 10⁻⁴ | 3.1 × 10⁻³ | looks like a bug — is not |
+| float32 | 10⁻⁶ | **0.39** | pure noise on a correct gradient |
+| float64, backward missing the 1/N | 10⁻⁶ | **0.75** | the real bug |
+
+The correct gradient checked in float32 at ε = 10⁻⁶ scores *worse* than nothing, while the genuinely broken one (a forgotten `/ N`, so every gradient is 4× too big) scores 0.75. Run gradient checks in **float64**, with **ε around 10⁻⁵ to 10⁻⁶**, on **small** inputs. That is why lab 02's `Tensor` stores float64 even though training will run in bf16 (P1.L3).
+
+---
+
+- **1.7·10⁻¹⁰** — correct, float64 (cross-entropy gradient vs central differences, ε = 10⁻⁴)
+- **0.75** — missing 1/N (every gradient 4× too large on a batch of 4 — a typical scaling bug)
+- **0.39** — correct, float32 (ε = 10⁻⁶: f(x+ε) − f(x−ε) is mostly rounding)
+- **2 × size** — forward passes (two per element of every input — keep checked tensors tiny)
+
+---
+
+## What a check catches — and what it does not
+
+**It catches:** a missing or extra factor (`/N`, the 2 in d(x²)/dx), a transpose in the wrong place, a forgotten `unbroadcast`, `=` instead of `+=`, a sign error, a gradient sent to the wrong input. In practice, almost every backward-pass bug.
+
+**It does not catch:**
+
+- **A forward pass that is wrong.** The check verifies that backward is the derivative of *your* forward. If forward computes the wrong function, both agree on the wrong answer. Test forward values separately against a reference — lab 02's `cross-entropy-value` does.
+- **Kinks.** At exactly x = 0, relu has no derivative; if a nudge crosses zero the numeric value is between 0 and 1. Random inputs almost never land there; when a check fails on one element of a relu layer, look at its value before you look at your code.
+- **Randomness.** Dropout draws a new mask each call, so `f(x + ε)` and `f(x − ε)` are different functions. Fix the seed, or check with dropout off.
+- **Mutation.** A check that does not restore `x[i]` corrupts every later element's result. Lab 02 tests for that too.
+
+---
+
+> **[isomorphism]** You have written this test before. When you replace a slow, obviously-correct implementation with a fast, clever one — a cache, a hand-rolled parser, a vectorised query — you run both on the same inputs and diff the outputs. Gradient checking is a differential test where the oracle is "nudge it and see", and it belongs in the same place: the unit tests of every new operation, never the training loop.
+
+---
+
+```python
+from tensor import Tensor, gradcheck
+import numpy as np
+
+x = Tensor(np.random.randn(3, 4))
+w = Tensor(np.random.randn(4, 2))
+assert gradcheck(lambda x, w: (x @ w).relu().sum(), [x, w])
+
+# PyTorch ships the same tool, and insists on float64 for the same reason:
+# torch.autograd.gradcheck(fn, (x.double().requires_grad_(),))
+```
+
+---
+
+**Q1. A new custom layer gradient-checks with relative error 3 × 10⁻³ in float32 at ε = 1e-4. What should you do?**
+   A. Ship it — 3 × 10⁻³ is small
+   B. Rewrite the backward pass — it is wrong
+   C. Re-run the check in float64 with ε ≈ 1e-6 before concluding anything: in float32 that error is what a correct gradient looks like
+   D. Use a larger ε until the error goes down
+   Answer: C — A correct cross-entropy gradient scored 3.1 × 10⁻³ under exactly those settings. Float32 cannot tell a correct gradient from a slightly wrong one at that step size. In float64 a correct gradient scores around 10⁻¹⁰ and a real bug stays large, so the verdict becomes unambiguous.
+
+**Q2. Every gradient in a model is exactly 2× what gradcheck says. Which bug is most consistent with that?**
+   A. A transpose in the matmul backward
+   B. A constant factor error — for example, the mean's 1/N applied once in forward but the loss summed, or a node's gradient added twice
+   C. Overflow in the softmax
+   D. The learning rate is 2× too high
+   Answer: B — A uniform scale points to a constant factor: a missing or extra 1/N or 2, or a contribution accumulated twice (for example, calling _backward on one node two times). A transpose bug gives a different pattern per element, not a clean ratio; the learning rate never enters the gradient.
+
+**Q3. A layer with dropout fails gradcheck on random elements, a different set each run. Most likely explanation?**
+   A. Dropout's backward pass is wrong
+   B. Each call to f draws a new dropout mask, so f(x+ε) and f(x−ε) are not the same function — fix the seed or disable dropout for the check
+   C. ε is too small
+   D. Dropout cannot be differentiated
+   Answer: B — Central differences assume the function is deterministic. A fresh random mask per call makes the numeric gradient noise. With the mask fixed, dropout's gradient (multiply by the same mask and scale) checks cleanly.
+
+---
+
+- CS231n, "Gradient checks" in the *Neural Networks Part 3* notes — the relative-error rule of thumb, kinks, and checking only a few dimensions of a large tensor.
+- PyTorch's `torch.autograd.gradcheck` and `gradgradcheck` (second derivatives): the same algorithm, with `eps=1e-6`, `atol=1e-5` and `rtol=1e-3` by default — lab 02's defaults.
+- This closes A1: you have an engine you trust. O1 now uses it to train something worth training.
+# O1.L1 — The MLP
+
+_Track O1: Networks & Optimisation · ~18 min · trainingspace_
+
+> Stack linear layers with a nonlinearity between them and you have a network that can learn almost any function — if its weights start at the right size. Start them at N(0, 1) and 91% of the units are dead on arrival.
+A **multilayer perceptron** (MLP) is the simplest network worth training:
+
+```
+h1 = act(x  @ W1 + b1)
+h2 = act(h1 @ W2 + b2)
+y  =     h2 @ W3 + b3
+```
+
+Linear layers (T0.L2) with an elementwise **activation function** between them. Every transformer block contains one — the "MLP" or "feed-forward" sub-block that holds two thirds of a GPT's parameters (M1.L5).
+
+## Why the nonlinearity is not optional
+
+Remove `act` and the network collapses: `(x @ W1) @ W2 = x @ (W1 @ W2)`, a single linear layer no matter how many you stack. Depth buys nothing without a nonlinearity in between. With one, an MLP with enough hidden units can approximate any continuous function on a bounded input — the **universal approximation theorem** — though the theorem says nothing about whether gradient descent will *find* those weights. Everything else in this track is about that second question.
+
+The activations you will meet:
+
+| name | formula | where |
+|---|---|---|
+| tanh | (eˣ − e⁻ˣ) / (eˣ + e⁻ˣ) | lab 01, older networks |
+| ReLU | max(0, x) | lab 02, most CNNs |
+| GELU | x · Φ(x) | GPT-2, BERT |
+| SwiGLU | (x·W) ⊙ swish(x·V) | Llama and most current LLMs (M1.L4) |
+
+---
+
+## Initialisation is arithmetic about variance
+
+Feed a batch through 20 layers of width 512 and measure the standard deviation of the activations. The only thing that changes between rows is the scale of the random initial weights. Measured with numpy on the reference laptop:
+
+| init | activation | std, layer 1 | layer 10 | layer 20 | note |
+|---|---|---|---|---|---|
+| N(0, 1) | tanh | 0.98 | 0.98 | 0.98 | **91% of units saturated** at ±1 |
+| N(0, 0.01²) | tanh | 0.22 | 3 × 10⁻⁷ | **1 × 10⁻¹³** | the signal vanishes |
+| 1/√n (Xavier) | tanh | 0.63 | 0.23 | 0.16 | slow decay — usable |
+| 1/√n (Xavier) | ReLU | 0.58 | 0.027 | **0.0008** | wrong rule for ReLU |
+| √(2/n) (Kaiming) | ReLU | 0.83 | 0.77 | **0.69** | stable |
+
+The first row looks healthy — standard deviation 0.98 everywhere — and is the worst of all. Almost every unit sits on tanh's flat tails, where the derivative 1 − tanh² is about zero, so **no gradient flows backward**. A network can have well-scaled activations and dead gradients at the same time.
+
+---
+
+### Where the √(2/n) comes from
+
+One output of a linear layer is a sum of n terms `w_i · x_i`. If the weights and inputs are independent with mean zero, variances add:
+
+```
+Var(out) = n · Var(w) · Var(x)
+```
+
+To keep `Var(out) = Var(x)` you need `Var(w) = 1/n` — std 1/√n, **Xavier/Glorot** initialisation. ReLU then zeroes half of its inputs, halving the variance it passes on, so to compensate `Var(w) = 2/n` — std √(2/n), **Kaiming/He** initialisation. That is the whole derivation, and it is why the Xavier-ReLU row decays by a factor of about √2 per layer.
+
+Transformers add one more rule on top: the output projections of each residual branch are often scaled down by a further 1/√(2·layers) (GPT-2), so that summing many branches into the residual stream (O1.L5) does not grow its variance with depth.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** What PyTorch does by default
+>
+> `torch.nn.Linear` initialises its weight from **U(−1/√fan_in, 1/√fan_in)** (it calls `kaiming_uniform_` with `a = √5`, which works out to that bound), giving a standard deviation of 1/√(3·fan_in) — smaller than either rule above. Its bias uses the same bound. That default is a reasonable start for shallow models; deep networks and transformers re-initialise explicitly (`nn.init.normal_(w, std=0.02)` in GPT-2-style code, or the rules above).
+>
+> Sources: https://pytorch.org/docs/stable/generated/torch.nn.Linear.html · https://pytorch.org/docs/stable/nn.init.html
+
+---
+
+_fig 1 — an MLP's forward and backward pass_
+
+Components: x ((B, 2)) · x·W1 + b1 (linear) · ReLU (half zeroed) · h·W2 + b2 (logits) · loss (scalar) · gradients flow back (through ReLU only where h > 0)
+
+Steps:
+1. The input is multiplied by the first weight matrix and shifted by a bias: a linear map that, on its own, could be folded into any later linear layer.
+2. ReLU zeroes every negative pre-activation. This is what makes the network more than one linear map — and it halves the variance, which is why ReLU layers need the factor 2 in √(2/n).
+3. A second linear layer produces one score per class, and the loss (O1.L2) reduces the batch to one number.
+4. Backward, the gradient passes through ReLU only where the unit was active. A unit that is negative for every input never learns again: a dead ReLU, often the result of a bad init or a too-large step.
+
+---
+
+> **[segfault]** The N(0, 1)-tanh network has the most normal-looking activation statistics in the table and trains worst. Watch **gradient norms per layer** as well as activations: a saturated or dead layer shows a gradient norm orders of magnitude below its neighbours from step one. E1.L2's debugging checklist logs both.
+
+---
+
+**Q1. A 30-layer ReLU MLP initialised with std 1/√fan_in trains extremely slowly; the first layers barely change. What is the most likely cause?**
+   A. The learning rate is too high
+   B. Xavier scaling ignores that ReLU halves the variance, so activations — and gradients — shrink by about √2 per layer, roughly 2¹⁵ over 30 layers
+   C. ReLU cannot be used in deep networks
+   D. The batch is too small
+   Answer: B — 1/√n preserves variance for a symmetric activation; ReLU throws away half of it per layer. Over 30 layers that compounds to a factor of about 2¹⁵ ≈ 33,000 in variance. Kaiming init (√(2/n)) is the fix; a higher learning rate would only shift the problem around.
+
+**Q2. Why is an MLP with no activation functions no more powerful than a single linear layer?**
+   A. It has fewer parameters
+   B. A composition of linear maps is a linear map: x·W1·W2 = x·(W1·W2), so depth adds no expressiveness
+   C. Gradients cannot flow through linear layers
+   D. Biases cancel out
+   Answer: B — Matrix multiplication is associative, so any stack of linear layers equals one linear layer with the product matrix (and a combined bias). Only a nonlinearity between them lets depth represent functions a single layer cannot.
+
+**Q3. A tanh network's activations have standard deviation ≈ 1 in every layer, yet it does not learn. What should you check?**
+   A. Nothing — std ≈ 1 means the init is perfect
+   B. Whether units are saturated near ±1: there tanh's derivative is ≈ 0, so almost no gradient reaches the weights
+   C. Whether the loss is cross-entropy
+   D. Whether the biases are zero
+   Answer: B — Std ≈ 1 for tanh outputs means most values are close to ±1 — the saturated tails. The measured N(0, 1) network had 91% of units there. Activation scale alone is not a health check; the gradient has to survive the activation's derivative too.
+
+---
+
+- Glorot and Bengio, "Understanding the difficulty of training deep feedforward neural networks" (AISTATS 2010) — the Xavier derivation.
+- He et al., "Delving Deep into Rectifiers" (2015, arxiv.org/abs/1502.01852) — the ReLU correction.
+- Rerun the table yourself: twenty `x = act(x @ W)` lines in numpy, printing `x.std()` and `(abs(x) > 0.99).mean()`.
+# O1.L2 — Cross-Entropy
+
+_Track O1: Networks & Optimisation · ~17 min · trainingspace_
+
+> Every language model is trained on one loss: minus the log-probability it gave the right next token. Its gradient is the simplest expression in deep learning — predicted minus actual — and computing it naively overflows at a logit of 89.
+T0.L1 used squared error for a model that predicts a number. A classifier — and a language model is a classifier over its vocabulary, asked once per position — predicts a **probability distribution** instead. It needs two pieces.
+
+## Softmax: scores to probabilities
+
+The last layer outputs one unbounded score per class, the **logits** `z`. Softmax turns them into probabilities:
+
+```
+p_i = exp(z_i) / Σ_j exp(z_j)
+```
+
+Every `p_i` is positive and they sum to 1. Adding the same constant to every logit changes nothing — the constant cancels between numerator and denominator. Keep that fact; it is what makes the computation safe.
+
+## Cross-entropy: score the right answer
+
+If the correct class is `y`, the loss is
+
+```
+L = −log p_y
+```
+
+Give the right answer probability 1 and the loss is 0. Give it 0.5 and the loss is 0.69. Give it 0.001 and the loss is 6.9 — confident and wrong is punished hard, without limit. Averaged over a batch (and, for a language model, over every position in every sequence), that is the loss of every model in the rest of this course.
+
+---
+
+- **ln C** — uniform guess (p_y = 1/C for every class, so L = −log(1/C) = ln C)
+- **10.82** — ln 50,257 (GPT-2's vocabulary: the loss of a model that knows nothing)
+- **11.76** — ln 128,256 (the vocabulary size of the Llama 3 tokenizer)
+- **0.69** — p = 0.5 (−ln 0.5: a coin flip on the right answer)
+
+---
+
+**ln C is your first sanity check.** A freshly initialised model has small, nearly equal logits, so its first loss should be within a few percent of ln(vocabulary size). If a GPT-2-vocabulary model logs 25 at step 0, its initial logits are far too large, and the first hundred steps will be spent undoing that. E1.L2 makes this the first line of its debugging checklist; lab 02 checks it for C = 10.
+
+Read the loss as **nats per token** (natural log). Divide by ln 2 for bits per token; `exp(L)` is the **perplexity** — "as uncertain as a uniform choice among exp(L) options". A loss of 3.0 is a perplexity of 20.
+
+## The gradient is predicted minus actual
+
+Combine the two formulas and differentiate with respect to the logits. Everything cancels to:
+
+```
+∂L/∂z_i = p_i − 1[i = y]          (divide by N for a batch mean)
+```
+
+The gradient pushes the correct class's logit up by (1 − p_y) and every other logit down by its own probability. A confident correct prediction gives a near-zero gradient; a confident wrong one gives the largest possible. It is the vector lab 02's `cross_entropy` returns, and it is why frameworks fuse softmax and the loss into one node: the fused backward needs only `p`, not the chain of `exp`, `sum`, `divide` and `log` nodes.
+
+---
+
+## Computing it without overflowing
+
+`exp` grows fast. Measured with numpy: `exp(709)` is 8.2 × 10³⁰⁷ in float64 and `exp(710)` is **inf**; in float32 the wall is between 88 and **89**. Logits of 100 are routine in a large model's last layer, so the textbook formula produces inf / inf = **nan**.
+
+The fix uses the shift-invariance above. Subtract each row's maximum logit before exponentiating — the largest exponent is then exactly 0 — and compute the log directly:
+
+```python
+shifted = z - z.max(axis=-1, keepdims=True)                         # largest entry is 0
+log_probs = shifted - np.log(np.exp(shifted).sum(axis=-1, keepdims=True))
+loss = -log_probs[np.arange(N), y].mean()
+```
+
+This is the **log-sum-exp trick**. Never compute `log(softmax(z))` as two steps: when a probability underflows to 0, its log is −inf even though the log-probability itself was a perfectly ordinary −120.
+
+---
+
+```python
+import torch.nn.functional as F
+
+# logits: (B, T, V) from the model; targets: (B, T) token ids
+loss = F.cross_entropy(logits.view(-1, V), targets.view(-1))
+# one fused, stable kernel: log-softmax + negative log-likelihood + mean.
+# Pass logits — never softmax(logits) — or you apply softmax twice.
+```
+
+---
+
+> **[segfault]** `F.cross_entropy` applies log-softmax itself. Passing it `softmax(logits)` squashes every input into [0, 1], so the second softmax sees nearly equal scores and the loss barely moves below ln C. Training "works" — the loss falls a little and then plateaus. If a classifier's loss stalls just under ln C, look for a softmax at the end of the model.
+
+---
+
+**Q1. A new language model with a 32,000-token vocabulary logs a loss of 41.7 at step 0. What does that tell you?**
+   A. Normal — losses start high
+   B. Something is wrong with the initial logits: a model that knows nothing should start near ln 32,000 ≈ 10.4, so these logits are far too large (bad init, missing scaling, or a bug in the output layer)
+   C. The vocabulary is too large
+   D. The learning rate is too high
+   Answer: B — With small, nearly equal logits the softmax is close to uniform and the loss is close to ln V. A loss four times larger means the model starts confidently wrong, which costs steps to unlearn and often hints at an initialisation bug. The learning rate cannot have acted yet at step 0.
+
+**Q2. For one example the model assigns p = [0.7, 0.2, 0.1] and the correct class is 1 (the 0.2). What is the gradient of the loss with respect to the logits?**
+   A. [0.7, 0.2, 0.1]
+   B. [0.7, −0.8, 0.1]
+   C. [−0.3, 0.8, −0.9]
+   D. [0, −1, 0]
+   Answer: B — ∂L/∂z = p − onehot(y) = [0.7, 0.2 − 1, 0.1] = [0.7, −0.8, 0.1]. Gradient descent subtracts it, so the correct logit rises and the others fall in proportion to the probability they stole.
+
+**Q3. A loss computed as -np.log(softmax(z)[y]) returns inf for some examples even though the model is training fine. Why, and what is the fix?**
+   A. The model is diverging — lower the learning rate
+   B. p_y underflowed to exactly 0 for very negative logits, and log(0) = −inf; compute log-softmax directly with the max-shift (log-sum-exp) instead of log of softmax
+   C. softmax should be replaced with sigmoid
+   D. Use float16 to get more range
+   Answer: B — A log-probability of −800 is a valid, finite number, but exp(−800) underflows to 0 in float64, and log(0) is −inf. Computing shifted − log Σ exp(shifted) never forms the tiny probability. Float16 has less range, not more.
+
+---
+
+- Derive the gradient yourself: write L = −z_y + log Σ exp(z_j) and differentiate each term — five lines.
+- Why cross-entropy and not squared error for classifiers: squared error on a sigmoid output has gradients that vanish exactly when the model is confidently wrong. Bishop, *Pattern Recognition and Machine Learning*, §4.3.
+- Label smoothing replaces the one-hot target with 0.9 on the right class and the rest spread evenly; it changes the gradient to p − smoothed_target. Check that your fused backward handles it.
+# O1.L3 — Optimisers
+
+_Track O1: Networks & Optimisation · ~21 min · trainingspace_
+
+> Plain gradient descent takes one step size for every parameter. On a loss surface that is a thousand times steeper in one direction than another, that step is either unstable or useless — and the fix, per-parameter step sizes, is why every LLM is trained with Adam.
+T0.L1's update was `p −= lr · g`: one learning rate for every parameter. Real loss surfaces punish that. Think of a long, narrow valley: very steep across, gently sloped along. A step size small enough not to bounce off the steep walls crawls along the floor.
+
+Make it concrete: the loss `½(1000·x₀² + x₁²)`, starting at (1, 1). Its curvature is 1,000 in one direction and 1 in the other — a **condition number** of 1,000. Gradient descent is stable only if `lr < 2 / 1000`, and at that step size the gentle direction shrinks by at most 0.2% per step. Measured with lab 03's code, 300 steps:
+
+---
+
+- **0.16** — SGD, lr 0.0019 (the steep direction is solved; x₁ is still 0.57 — 300 steps of 0.19% shrinkage)
+- **3.4·10⁻⁷** — SGD + momentum 0.9 (same lr; the consistent direction accumulates speed)
+- **4.8·10⁻¹⁰** — Adam, lr 0.05 (with 10 warmup steps and cosine decay (lab 03's lr_at))
+- **1,000** — condition number (ratio of the steepest to the gentlest curvature)
+
+---
+
+## Momentum: remember the direction
+
+Keep a running sum of past gradients and step along that instead:
+
+```
+buf ← μ · buf + g          (μ ≈ 0.9)
+p   ← p − lr · buf
+```
+
+Across the valley the gradient flips sign every step, so the contributions cancel. Along the floor it points the same way every step, so the buffer grows towards g / (1 − μ) — ten times the raw gradient at μ = 0.9. The oscillation is damped and the slow direction speeds up: 0.16 becomes 3.4 × 10⁻⁷.
+
+## Adam: a step size per parameter
+
+Adam keeps two running averages per parameter: of the gradient (**m**, momentum) and of the squared gradient (**v**, its typical magnitude). It steps by their ratio:
+
+```
+m ← β1·m + (1 − β1)·g          β1 = 0.9
+v ← β2·v + (1 − β2)·g²         β2 = 0.999 (0.95 for LLMs)
+p ← p − lr · m̂ / (√v̂ + ε)      m̂, v̂: bias-corrected (below)
+```
+
+Dividing by √v normalises each parameter's step by its own gradient scale. In the valley, the steep coordinate has gradients 1,000× larger, and its step is divided by 1,000× more: both coordinates move at roughly `lr` per step. Adam is approximately invariant to how each parameter is scaled — and in a transformer, embedding rows, attention projections and LayerNorm gains differ in gradient scale by orders of magnitude.
+
+**Bias correction.** m and v start at zero, so early on they are too small — v especially, because β2 = 0.999 averages over about 1,000 steps. Dividing by (1 − βᵗ) undoes that. Without it, the first update is (1 − β1)/√(1 − β2) ≈ **3.2× too large**, exactly when the model is least settled. With it, step one moves every parameter by exactly lr·sign(g) — lab 03's `adam-first-step` check.
+
+---
+
+_fig 1 — one Adam update for one parameter_
+
+Components: g (gradient) · m ← β1·m + … (direction) · v ← β2·v + … (magnitude²) · bias-correct (÷ (1 − βᵗ)) · p −= lr·m̂/√v̂ (≈ lr per param)
+
+Steps:
+1. The gradient feeds two exponential moving averages: m tracks its direction over about 10 steps, v tracks its squared size over about 1,000.
+2. Both averages start at zero and would be biased low for the first steps; dividing by 1 − βᵗ corrects them exactly.
+3. The step is m̂/√v̂: a direction divided by a typical magnitude. A parameter with huge gradients and one with tiny gradients both move about lr per step.
+4. The price is state: m and v are one fp32 number each per parameter — the 8 of T0.L4's 16 bytes per parameter, and the first thing ZeRO shards (D1.L3).
+
+---
+
+## AdamW: weight decay done right
+
+**Weight decay** pulls every weight towards zero a little each step — a preference for small weights that helps generalisation (O1.L6). With SGD you can add `wd · p` to the gradient (an L2 penalty) and get exactly that. With Adam you cannot: the added term is divided by √v like everything else, so parameters with large gradients barely decay and parameters with tiny gradients decay at full speed. Loshchilov and Hutter's fix, **AdamW**, applies the decay directly to the weights, outside the adaptive step:
+
+```
+p ← p · (1 − lr · wd)          then the normal Adam update, with g untouched
+```
+
+Every LLM recipe you will read uses AdamW. In PyTorch, `torch.optim.Adam(weight_decay=…)` is the L2 version and `torch.optim.AdamW` the decoupled one — same argument name, different maths. Lab 03 implements both behind one flag.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** A published LLM optimiser recipe
+>
+> Llama 2's pretraining used **AdamW with β1 = 0.9, β2 = 0.95, ε = 10⁻⁵, weight decay 0.1**, gradient clipping at 1.0, 2,000 warmup steps and cosine decay to 10% of the peak learning rate. The lower β2 (0.95 instead of PyTorch's default 0.999) makes v react faster to sudden gradient growth, which helps stability in large runs (P1.L6). PyTorch's own AdamW defaults are β = (0.9, 0.999), ε = 10⁻⁸, weight decay 0.01.
+>
+> Sources: https://arxiv.org/abs/2307.09288 · https://pytorch.org/docs/stable/generated/torch.optim.AdamW.html
+
+---
+
+**Hands-on lab 03: Optimisers, Schedules and Clipping** (graded in your browser) — Implement SGD with momentum, Adam with bias correction, AdamW's decoupled decay, the warmup-cosine schedule of O1.L4 and global-norm clipping — matched to PyTorch's update rules — then race SGD against Adam on the condition-1,000 bowl from this lesson.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/optimisers
+
+---
+
+**Q1. You switch from torch.optim.Adam(weight_decay=0.1) to torch.optim.AdamW(weight_decay=0.1) with everything else equal. What changed?**
+   A. Nothing — AdamW is an alias
+   B. Weight decay is now applied directly to the weights instead of being added to the gradient and rescaled by √v, so every parameter decays at the same rate
+   C. AdamW turns off bias correction
+   D. AdamW uses SGD for the decay and Adam for the gradient, doubling memory
+   Answer: B — Adam's weight_decay is an L2 term added to g, which the adaptive denominator then rescales per parameter. AdamW applies p ← p·(1 − lr·wd) separately. Same argument name, different regulariser — a common source of irreproducible results when porting recipes.
+
+**Q2. Why is SGD with a single learning rate slow on an ill-conditioned problem?**
+   A. SGD has no momentum by default
+   B. The learning rate must stay below 2 / (largest curvature) to be stable, which makes progress along the flattest direction proportional to smallest / largest curvature — tiny when the condition number is large
+   C. SGD only works on convex problems
+   D. The gradient is computed less accurately
+   Answer: B — Stability is set by the steepest direction, speed by the flattest. On the bowl in this lesson that is a 0.19% improvement per step along x₁. Momentum and per-parameter scaling (Adam) both attack this ratio; a bigger learning rate just diverges.
+
+**Q3. A 7B model is trained with AdamW. How much memory do Adam's m and v take in fp32?**
+   A. 14 GB
+   B. 28 GB
+   C. 56 GB
+   D. 112 GB
+   Answer: C — Two fp32 numbers per parameter: 7 × 10⁹ × 8 bytes = 56 GB — half of T0.L4's 112 GB of training state, and more than the bf16 weights and gradients combined. That is why optimiser state is the first thing ZeRO shards and why 8-bit optimisers exist.
+
+---
+
+- Kingma and Ba, "Adam: A Method for Stochastic Optimization" (2014, arxiv.org/abs/1412.6980) — algorithm 1 is lab 03's `Adam.step`.
+- Loshchilov and Hutter, "Decoupled Weight Decay Regularization" (2017, arxiv.org/abs/1711.05101) — AdamW.
+- Goh, "Why Momentum Really Works" (distill.pub/2017/momentum) — the valley picture, interactive.
+- Newer optimisers (Lion, Sophia, Muon, Shampoo) trade Adam's per-parameter scaling for other preconditioners; each paper's first table is a comparison against AdamW, which is still the baseline to beat.
+# O1.L4 — Learning-Rate Schedules
+
+_Track O1: Networks & Optimisation · ~17 min · trainingspace_
+
+> The learning rate is not a constant. It ramps up for the first few thousand steps, holds, and decays towards zero — and skipping the ramp can leave a transformer stuck at the loss of a uniform guess for its whole run.
+Lab 03's `lr_at` encodes the schedule nearly every LLM is trained with:
+
+1. **Warmup** — rise linearly from about 0 to the peak over the first steps (hundreds to a few thousand).
+2. **Decay** — fall from the peak to a floor (often 10% of the peak) along a cosine curve, ending at the last step.
+
+Each half solves a different problem.
+
+## Why decay
+
+A stochastic gradient is the true gradient plus noise: each batch is a sample. Near the bottom of the loss, the true gradient is small and the noise is not, so a constant step keeps jostling the parameters around the minimum. The size of that jostle scales with the learning rate. Lowering the learning rate late in training shrinks it — which is why loss curves typically drop noticeably during the final decay, after looking flat for a long time. Cosine is one smooth way to do this; linear decay works about as well. What matters most is that the rate ends low.
+
+---
+
+## Why warmup: an experiment
+
+A small transformer — 6 layers, width 64, 4 heads, the original **post-norm** layout (O1.L5) — learns a toy task: predict `(x_t + x_{t−1}) mod 32` from a random token sequence. AdamW, batch 64, 600 steps, three seeds per setting, PyTorch on the reference laptop. Final losses (ln 32 = 3.47 is "learned nothing"):
+
+| peak lr | no warmup | 150 warmup steps |
+|---|---|---|
+| 1 × 10⁻³ | 0.55 · 0.76 · 2.10 | 0.77 · 0.03 · 0.02 |
+| 3 × 10⁻³ | **3.47 · 3.47 · 3.47** | **0.42 · 0.78 · 2.10** |
+| 1 × 10⁻² | 3.47 · 3.47 · 3.47 | 3.47 · 3.47 · 3.47 |
+
+At 3 × 10⁻³ every run without warmup stays at the loss of a uniform guess for 600 steps; with warmup every run learns. At 10⁻² warmup is not enough on its own.
+
+Why the first steps are dangerous:
+
+- **Adam's statistics are not ready.** v is an average over about 1/(1 − β2) steps; after 3 steps it has seen 3 gradients. Bias correction makes it unbiased, not reliable, so the per-parameter step sizes are noisy exactly when the weights are random.
+- **Early gradients are large and correlated.** A freshly initialised network has big, consistent gradients in a few directions. A full-size step along them can push LayerNorm inputs, attention logits or the output layer into a regime — saturated softmax, collapsed attention — that it does not climb out of. The stuck runs above are that failure: the loss does not explode, it flatlines.
+
+Warmup buys the statistics time to settle and lets the model take its first steps small.
+
+---
+
+_fig 1 — warmup, cosine decay, and WSD_
+
+Components: warmup (0 → peak, linear) · peak lr (most learning) · cosine decay (to ~10% of peak) · last step (loss drops here) · WSD (hold, then short decay)
+
+Steps:
+1. Warmup ramps the learning rate linearly from near zero to the peak over the first hundreds or thousands of steps, while Adam's moment estimates fill in.
+2. Most of the learning happens near the peak. The peak value is the single most important hyper-parameter of the run; it is usually found by a sweep on a small model.
+3. Cosine decay lowers the rate smoothly to a floor at the final step. The total length must be fixed in advance — the curve depends on it.
+4. Warmup-stable-decay holds the peak and decays only in a short final phase, so a run can be extended without restarting, and checkpoints from the stable phase can each be decayed into a finished model.
+
+---
+
+## Warmup-stable-decay
+
+Cosine has an operational flaw: its shape depends on the total number of steps, so you must decide the length of the run before you start, and a cosine run cannot be extended without re-warming. **WSD** (warmup → stable → decay) holds the peak for most of the run and decays over a short final stretch, often around 10% of the steps. Reported results match cosine at the end, and any stable-phase checkpoint can be decayed into a finished model — useful for scaling-law sweeps (P1.L5), where you want models trained for many different token counts from one run.
+
+## Choosing the peak
+
+The peak learning rate is found empirically: sweep it on a small model, a factor of about 3 between trials, and take the largest value that trains stably. It generally **falls as models grow** — published large-model peaks are typically around 10⁻⁴ to a few × 10⁻⁴, small models train at 10⁻³ and above. The warmup length is much less sensitive; a few hundred to a few thousand steps is common.
+
+---
+
+> **[warning]** Two runs with different total lengths and a cosine schedule have different learning rates at every step after warmup. Comparing their losses at step 10,000 compares two different schedules, not two models. Compare final losses, or use WSD and compare decayed checkpoints.
+
+---
+
+**Q1. A team doubles the planned length of a cosine-scheduled run halfway through by editing total_steps and resuming. What happens to the learning rate at the resume point?**
+   A. Nothing — the schedule continues smoothly
+   B. It jumps upward: halfway through the old schedule becomes a quarter of the way through the new one, which sits higher on the cosine — an abrupt increase that can destabilise the run
+   C. It drops to the minimum
+   D. Warmup restarts from zero
+   Answer: B — Cosine is a function of step / total. Changing the total moves the current step to an earlier point on the curve, where the rate is higher. WSD avoids this: in the stable phase the rate does not depend on the total length.
+
+**Q2. In this lesson's experiment, why did warmup rescue the post-norm runs at 3·10⁻³ but not at 10⁻²?**
+   A. Warmup only works below 5·10⁻³ by definition
+   B. Warmup protects the first steps; at 10⁻² the steps are still too large once warmup ends, so the run fails after the ramp — warmup lowers the risk of a high peak, it does not remove it
+   C. The 10⁻² runs needed more seeds
+   D. AdamW disables warmup above 10⁻²
+   Answer: B — Warmup changes only the first 150 steps. If the peak itself is too large for the architecture, the instability arrives at the end of the ramp instead. Architecture changes (pre-norm, O1.L5) widen the stable range far more — the same experiment with pre-norm learned at every rate tested.
+
+**Q3. Why does the loss of a long run often drop sharply during the final decay phase?**
+   A. The model suddenly learns new features
+   B. Gradient noise keeps the parameters bouncing around the minimum at a size set by the learning rate; lowering the rate shrinks the bounce, so the parameters settle closer to the bottom
+   C. Evaluation changes at the end of training
+   D. The data gets easier
+   Answer: B — At a constant learning rate the stochastic gradient noise sets a floor on how close the iterate gets to the minimum. Decaying the rate lowers that floor, so the loss falls even though the "direction" learned has not changed much.
+
+---
+
+- Goyal et al., "Accurate, Large Minibatch SGD: Training ImageNet in 1 Hour" (2017) — where linear warmup became standard.
+- Xiong et al., "On Layer Normalization in the Transformer Architecture" (2020, arxiv.org/abs/2002.04745) — why post-norm transformers need warmup and pre-norm ones much less.
+- Hu et al., "MiniCPM" (2024, arxiv.org/abs/2404.06395) — the warmup-stable-decay schedule.
+- Rerun the experiment: `nn.TransformerEncoderLayer(..., norm_first=False)` versus `norm_first=True`, three seeds each.
+# O1.L5 — Normalisation and Residuals
+
+_Track O1: Networks & Optimisation · ~19 min · trainingspace_
+
+> Deep networks are trainable because of two cheap tricks: add each layer's output to its input instead of replacing it, and rescale what each layer sees to a standard size. Where you put the rescaling decides whether a 6-layer transformer trains at all.
+## Residual connections: add, don't replace
+
+A plain deep network computes `x ← f(x)` at every layer. A **residual** network computes
+
+```
+x ← x + f(x)
+```
+
+Each layer adds a correction to a running vector — the **residual stream** — instead of rewriting it. Two consequences:
+
+- **Gradients have a highway.** The derivative of `x + f(x)` with respect to `x` is `1 + f'(x)`. However badly the branches behave, the identity term carries the gradient from the loss straight back to the first layer. That is why residual networks train at 100+ layers where plain ones stall at about 20.
+- **Every layer reads and writes one shared stream.** In a transformer, attention and MLP blocks each read the stream, compute something, and add it back. M1.L4 builds on this view.
+
+The catch: each branch adds variance. Measured with numpy (width 512, Kaiming-initialised ReLU branches), the standard deviation of the stream after L layers:
+
+---
+
+| layout | update | layer 1 | 12 | 24 | 48 |
+|---|---|---|---|---|---|
+| plain residual | x + f(x) | 1.3 | 233 | 1.3 × 10⁵ | **4.6 × 10¹⁰** |
+| pre-norm | x + f(norm(x)) | 1.3 | 3.0 | 4.2 | **5.8** |
+| post-norm | norm(x + f(x)) | 1.0 | 1.0 | 1.0 | **1.0** |
+
+Without normalisation the stream compounds multiplicatively and overflows any float format long before 48 layers (bf16 and fp16 top out at 3.4 × 10³⁸ and 65,504). Normalisation is what makes the residual trick usable at depth.
+
+---
+
+## LayerNorm and RMSNorm
+
+**LayerNorm** rescales each token's vector to mean 0 and variance 1, then applies a learned per-feature scale γ and shift β:
+
+```python
+def layer_norm(x, gamma, beta, eps=1e-5):            # x: (..., d)
+    mu = x.mean(-1, keepdims=True)
+    var = x.var(-1, keepdims=True)
+    return gamma * (x - mu) / np.sqrt(var + eps) + beta
+```
+
+**RMSNorm** drops the mean subtraction and the shift: `gamma * x / sqrt(mean(x²) + eps)`. It is cheaper — one reduction instead of two, no β — and in practice trains as well, which is why Llama-family models use it. The two are not the same function: on inputs whose mean is not zero they differ (by 0.32 on average in a quick test with mean-1 inputs), so a checkpoint trained with one cannot be run with the other.
+
+Both normalise **per token, across features** — unlike batch normalisation, which normalises each feature across the batch and makes one example's output depend on the others in its batch. Language models avoid batch norm for exactly that reason: the batch at training time and the single sequence at inference time would see different statistics.
+
+---
+
+## Pre-norm versus post-norm
+
+The original transformer (2017) normalised *after* adding: `x ← norm(x + f(x))`. The stream is pinned at scale 1 — but the normalisation sits on the gradient highway, so every layer's backward pass goes through a rescaling, and gradients near the output can be much larger than near the input. Post-norm transformers train, but they are fragile: they need warmup and a carefully chosen learning rate.
+
+GPT-2 and nearly every model since normalise the branch's *input* instead: `x ← x + f(norm(x))`. The identity path is untouched, the stream grows slowly (√L-ish, 5.8 at 48 layers above), and one final norm before the output layer cleans it up.
+
+The difference is not cosmetic. Rerunning O1.L4's experiment — the same 6-layer transformer, task and seeds — with `norm_first=True`:
+
+---
+
+| peak lr | post-norm, no warmup | post-norm, warmup | **pre-norm, no warmup** | **pre-norm, warmup** |
+|---|---|---|---|---|
+| 1 × 10⁻³ | 0.55 · 0.76 · 2.10 | 0.77 · 0.03 · 0.02 | 0.004 · 0.012 · 0.005 | 0.034 · 0.025 · 0.003 |
+| 3 × 10⁻³ | 3.47 · 3.47 · 3.47 | 0.42 · 0.78 · 2.10 | 0.018 · 0.013 · 0.005 | 0.001 · 0.028 · 0.017 |
+| 1 × 10⁻² | 3.47 · 3.47 · 3.47 | 3.47 · 3.47 · 3.47 | 0.025 · 0.007 · 0.033 | 0.015 · 0.021 · 0.029 |
+
+Pre-norm got below 0.04 on all 18 runs, with or without warmup, at every learning rate; post-norm escaped the uniform-guess loss on 9 of 18 and got below 0.1 on only 2. Final losses after 600 steps, three seeds each, PyTorch `nn.TransformerEncoderLayer` on the reference laptop.
+
+---
+
+_fig 1 — one pre-norm transformer layer_
+
+Components: x (stream) · norm (RMS/Layer) · attention (M1.L3) · x + … (residual add) · norm (RMS/Layer) · MLP (O1.L1) · x + … (to next layer)
+
+Steps:
+1. The residual stream arrives. The branch reads a normalised copy of it; the stream itself goes around the branch untouched.
+2. Attention computes a correction from the normalised input and adds it back onto the stream. The add is the only place the branch touches the stream.
+3. The MLP branch repeats the pattern: normalise a copy, transform it, add the result.
+4. Backward, the gradient flows along the straight identity path from add2 to add1 to x with no rescaling in between — the property post-norm gives up by putting the norm on that path.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** What current models use
+>
+> GPT-2 moved LayerNorm to the input of each sub-block and added a final LayerNorm after the last block. LLaMA (2023) uses **pre-normalisation with RMSNorm**, together with SwiGLU activations and rotary position embeddings (M1.L2) — a combination most open models since have adopted. PyTorch's `nn.TransformerEncoderLayer` defaults to post-norm (`norm_first=False`) for compatibility with the 2017 paper.
+>
+> Sources: https://arxiv.org/abs/2302.13971 · https://pytorch.org/docs/stable/generated/torch.nn.TransformerEncoderLayer.html
+
+---
+
+**Q1. You build a transformer with nn.TransformerEncoderLayer and default arguments, and it only trains with a long warmup and a small learning rate. What is the first thing to try?**
+   A. Remove the residual connections
+   B. Set norm_first=True: the default is the post-norm layout, which puts normalisation on the gradient path and is far less stable
+   C. Replace LayerNorm with batch norm
+   D. Increase the number of layers
+   Answer: B — PyTorch defaults to post-norm for compatibility with the 2017 paper. In this lesson's experiment the pre-norm version trained at every learning rate tested, with or without warmup; the post-norm one failed at 3·10⁻³ without warmup and at 10⁻² with it.
+
+**Q2. Why do language models use LayerNorm or RMSNorm rather than batch normalisation?**
+   A. Batch norm has more parameters
+   B. Batch norm normalises each feature across the examples in a batch, so outputs depend on the other sequences in the batch and its statistics differ between training batches and single-sequence inference; per-token norms have neither problem
+   C. Batch norm cannot be differentiated
+   D. Batch norm only works for images
+   Answer: B — Per-token normalisation uses only the token's own features, so a sequence's output does not depend on what else is in the batch and inference behaves exactly like training. Batch norm needs running statistics and couples examples together.
+
+**Q3. Why does a residual network train at depths where a plain network does not?**
+   A. It has fewer parameters
+   B. The identity term in x + f(x) gives the gradient a path from the loss to every layer that does not pass through any branch, so it cannot vanish however many layers there are
+   C. Residual connections normalise activations
+   D. It uses a larger learning rate
+   Answer: B — d(x + f(x))/dx = 1 + f'(x): the 1 survives any number of layers. Residuals do NOT control the forward scale — the plain-residual row grew to 4.6·10¹⁰ — which is why they are paired with normalisation.
+
+---
+
+- He et al., "Deep Residual Learning for Image Recognition" (2015) — residual connections.
+- Ba, Kiros and Hinton, "Layer Normalization" (2016); Zhang and Sennrich, "Root Mean Square Layer Normalization" (2019).
+- Xiong et al., "On Layer Normalization in the Transformer Architecture" (2020) — the gradient analysis behind pre-norm's stability.
+- Elhage et al., "A Mathematical Framework for Transformer Circuits" (transformer-circuits.pub, 2021) — the residual stream as a shared communication channel.
+# O1.L6 — Generalisation
+
+_Track O1: Networks & Optimisation · ~16 min · trainingspace_
+
+> Training loss measures how well the model fits what it has seen. The number you actually care about is how it does on what it has not — and the two can move in opposite directions for thousands of steps while accuracy does not change at all.
+Hold some data back. Never train on it; evaluate on it every few hundred steps. That **validation set** is the only honest measure of whether the model learned something general or memorised its training set — the difference T0.L1 warned about.
+
+## An experiment in memorisation
+
+A 20-dimensional classification task with noisy labels — 200 training examples, 2,000 validation examples — and an MLP with two hidden layers of 256 units: about 72,000 parameters for 200 examples. AdamW at 10⁻³, full-batch, measured on the reference laptop:
+
+---
+
+| step | train loss | val loss | val accuracy |
+|---|---|---|---|
+| 1 | 0.702 | 0.672 | 61.4% |
+| 250 | — | **0.623** (best) | — |
+| 500 | 0.000 | 0.703 | 87.3% |
+| 1,250 | 0.000 | 0.819 | 86.9% |
+| 3,000 | 0.000 | **0.950** | 87.1% |
+
+By step 500 training loss is zero to three decimal places: the network has memorised all 200 labels, noise included. From then on, validation loss rises steadily while validation accuracy does not move. The model is not getting more examples wrong — it is getting the ones it gets wrong **more confidently** wrong, and cross-entropy (O1.L2) punishes confidence without limit.
+
+---
+
+- **~72,000** — parameters (20·256 + 256·256 + 256·2, plus biases)
+- **200** — training examples (with label noise — some labels are wrong)
+- **0.000** — train loss by step 500 (every training label, noise included, memorised)
+- **0.62 → 0.95** — val loss, step 250 → 3,000 (validation accuracy 87.3% → 87.1% over the same steps)
+
+---
+
+## The tools, and what they did here
+
+**Early stopping.** Keep the checkpoint with the best validation loss — step 250 above. It is free, and the reason every training loop evaluates periodically and checkpoints (P1.L2).
+
+**Weight decay.** Pulling weights towards zero (AdamW, O1.L3) penalises the large weights that sharp, memorising fits need. Same experiment, final validation loss after 3,000 steps:
+
+| regulariser | best val loss | val loss at 3,000 |
+|---|---|---|
+| none | 0.623 | 0.950 |
+| weight decay 0.1 | 0.605 | 0.820 |
+| weight decay 1.0 | **0.510** | **0.659** |
+| dropout 0.5 | 0.582 | 1.560 |
+
+**Dropout** — zero a random half of the hidden units on each training step — improved the best checkpoint but made the long-run loss *worse* here: with full-batch training and nothing to stop it, the network still memorised, and the evaluation-time network (dropout off) was more overconfident than the one it trained. Regularisers are not interchangeable, and the only way to know which helps is to measure on held-out data.
+
+**More data** beats all of them. The ratio here — 360 parameters per example — is extreme. Pretraining sits at the other end.
+
+---
+
+> **[isomorphism]** A 7B model trained on 2 trillion tokens sees about **285 tokens per parameter**, and usually sees each token **once**. A model cannot memorise examples it never repeats, so pretraining train and validation losses track each other closely, and dropout is typically switched off. Overfitting returns in the places where data is small and repeated: fine-tuning (F1), multiple epochs over scarce data, and benchmark contamination (E1.L1) — where the "validation" set leaked into training and the score measures memory.
+
+---
+
+_fig 1 — reading two loss curves_
+
+Components: both falling (learning) · gap opens (val flattens) · val rises (memorising) · best checkpoint (early stopping) · regularise / more data (next run)
+
+Steps:
+1. Early in training both losses fall together: what the model learns from the training set transfers to data it has not seen.
+2. A gap opens: training loss keeps falling, validation flattens. The model is starting to fit details specific to the training examples.
+3. Validation loss rises while training loss heads to zero — memorisation. Accuracy may not move at all; the loss is reporting overconfidence first.
+4. Keep the checkpoint from the validation minimum, then fix the cause for the next run: more data, weight decay, a smaller model or fewer epochs.
+
+---
+
+**Q1. A fine-tuning run's validation loss rises for 2,000 steps while validation accuracy stays flat. A teammate says "accuracy is fine, so nothing is wrong". What is the better reading?**
+   A. They are right — loss and accuracy measure the same thing
+   B. The model is becoming more confident on the examples it gets wrong; it is overfitting, and calibrated probabilities (which downstream uses like sampling and ranking depend on) are getting worse — stop at the validation-loss minimum
+   C. The validation set is broken
+   D. Raise the learning rate to escape the plateau
+   Answer: B — Accuracy only counts the argmax; cross-entropy also measures confidence. Rising validation loss with flat accuracy is the signature of growing overconfidence from memorisation, as in this lesson's experiment. For a language model the probabilities ARE the product — sampling (M1.L6) draws from them.
+
+**Q2. Why do large pretraining runs usually train without dropout?**
+   A. Dropout is incompatible with attention
+   B. Each token is typically seen once, so there is little opportunity to memorise; train and validation losses track each other and dropout would only slow learning
+   C. Dropout uses too much memory
+   D. Weight decay replaces it exactly
+   Answer: B — Overfitting needs repetition. With trillions of tokens and roughly one epoch, the model never sees an example twice, so regularising against memorisation costs learning speed for no benefit. It returns when data is small and repeated, as in fine-tuning.
+
+**Q3. Which checkpoint should you keep from this lesson's unregularised run?**
+   A. Step 1
+   B. Step 250 — lowest validation loss
+   C. Step 500 — training loss reached zero
+   D. Step 3,000 — the final one
+   Answer: B — The validation minimum (0.623 at step 250) is the best estimate of performance on new data. Zero training loss marks memorisation, not success; the final checkpoint is the most overconfident.
+
+---
+
+- Zhang et al., "Understanding deep learning requires rethinking generalization" (2016) — networks that memorise random labels perfectly, and what that implies.
+- Nakkiran et al., "Deep Double Descent" (2019) — why bigger models can generalise better even past the point of memorising.
+- Rerun the experiment with 2,000 training examples instead of 200 and watch the gap close.
+- This closes O1. M1 builds the model all of this will train.
+# M1.L1 — Tokenization
+
+_Track M1: The Transformer · ~18 min · trainingspace_
+
+> A language model never sees text. It sees integers from a vocabulary fixed before training began — and the size of that vocabulary is a trade between how long every sequence is and how many parameters the first and last layers cost.
+The model is a function of integers. Something has to turn `"The cat sat."` into `[464, 3797, 3332, 13]` before training, and turn the model's integer predictions back into text afterwards. That something is the **tokenizer**, and it is trained once, separately, and then frozen: every embedding row the model learns is tied to a token id.
+
+## Three ways to cut text
+
+| unit | vocabulary | sequence length | problem |
+|---|---|---|---|
+| characters / bytes | 256 | longest — one per byte | every sequence is 3–4× longer than it needs to be, and attention cost grows with length |
+| words | hundreds of thousands | shortest | unseen words, typos, other languages and code have no id |
+| **subwords (BPE)** | 30k–250k | in between | none fatal — the standard choice |
+
+**Byte-level BPE** gets the best of both. Start from the 256 byte values, so any string in any language — or any binary garbage — can be encoded. Then repeatedly find the most frequent adjacent pair of tokens in the training corpus and add it to the vocabulary as a new token. After tens of thousands of merges, common words are single tokens, rare words are a few pieces, and nothing is ever unknown.
+
+---
+
+```python
+ids = list(text.encode("utf-8"))           # 256 base tokens: the bytes
+merges = {}
+for new_id in range(256, vocab_size):
+    stats = get_stats(ids)                  # count adjacent pairs
+    pair = max(stats, key=stats.get)        # most frequent pair
+    ids = merge(ids, pair, new_id)          # replace it everywhere
+    merges[pair] = new_id                   # the merges ARE the tokenizer
+```
+
+---
+
+## What the merges buy
+
+Training lab 04's tokenizer on its own 3,440-byte corpus and encoding that corpus, on the reference laptop:
+
+| vocabulary | merges | bytes per token |
+|---|---|---|
+| 256 | 0 | 1.00 |
+| 300 | 44 | 1.71 |
+| 400 | 144 | 2.87 |
+| 512 | 256 | 4.57 |
+| 1,024 | 768 | 3,440 — the whole text is one token |
+
+The last row is a warning, not a result: the corpus is one paragraph repeated four times, and with enough merges the tokenizer memorises it. Real tokenizers are trained on gigabytes of diverse text so that the merges capture *common* structure. On English prose, production tokenizers average roughly four bytes per token.
+
+## The vocabulary-size trade
+
+A larger vocabulary means **shorter sequences** — fewer tokens per document, so fewer FLOPs per document (P1.L4) and more text in a fixed context window. It costs **parameters** at both ends of the model: the input embedding is a `(V, C)` matrix and the output layer another `(C, V)` unless they are tied (M1.L5). It also makes each output softmax wider, and gives rare tokens fewer training examples each.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** Vocabulary sizes in practice
+>
+> GPT-2 used a byte-level BPE vocabulary of **50,257** tokens (50,000 merges, 256 bytes, one end-of-text token). Meta's Llama 3 moved to a **128,256**-token vocabulary, and reported that it encodes language "much more efficiently", yielding up to 15% fewer tokens than Llama 2's 32,000-token vocabulary. At Llama 3 8B's width of 4,096 the input embedding is 128,256 × 4,096 ≈ **525 million** parameters, and the separate output layer the same again — about 13% of the model together.
+>
+> Sources: https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf · https://ai.meta.com/blog/meta-llama-3/
+
+---
+
+> **[segfault]** - **Arithmetic and spelling.** If "1234" is one token and "1235" is two, the model sees numbers as unrelated symbols; counting the letters of a word it only ever saw as one token is hard for the same reason.
+> - **Languages pay different prices.** A tokenizer trained mostly on English cuts other scripts into more tokens per character, so the same sentence costs more compute, fills the context sooner, and — through a paid API — costs more.
+> - **Leading spaces.** " cat" and "cat" are different tokens in GPT-2-style vocabularies. Prompt code that strips or adds a space changes the ids the model sees.
+
+---
+
+**Hands-on lab 04: A Byte-Level BPE Tokenizer** (graded in your browser) — Write get_stats, merge, train, encode and decode: train on a corpus, reproduce the textbook merges on "aaabdaaabac", round-trip English, accents, CJK and emoji losslessly, and handle a sequence that stops mid-character.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/bpe-tokenizer
+
+---
+
+**Q1. A team proposes growing their tokenizer's vocabulary from 32k to 256k "for free compression". Which cost are they leaving out?**
+   A. None — a larger vocabulary is strictly better
+   B. The embedding and output matrices grow with V: at width 4,096, 256k tokens is about 1 billion parameters per matrix, plus a wider softmax and fewer training examples per rare token
+   C. Byte-level BPE cannot exceed 65,536 tokens
+   D. Sequences get longer
+   Answer: B — Compression is real — sequences shrink — but every extra token adds a row to the input embedding and a column to the output layer: 256,000 × 4,096 ≈ 1.05 B parameters each. For a small model that can be most of its parameters. Vocabulary size is a trade, not a free lunch.
+
+**Q2. Why do modern tokenizers start from bytes rather than from characters or words?**
+   A. Bytes compress better
+   B. With all 256 byte values in the base vocabulary, every possible input — any language, emoji, code, even invalid UTF-8 — can be encoded; there is no unknown token
+   C. Models can only read numbers below 256
+   D. Bytes make attention cheaper
+   Answer: B — A word or character vocabulary always meets inputs it has no id for. Starting from bytes guarantees coverage; the merges then recover efficiency on common text. Coverage is the property; compression comes from the merges.
+
+**Q3. You retrain your tokenizer on a better corpus halfway through a project and load the new tokenizer with your existing pretrained checkpoint. What happens?**
+   A. The model improves because the tokenizer is better
+   B. The model breaks: its embedding rows were learned for the old ids, and the same id now means a different string — the tokenizer and the weights are one artefact
+   C. Nothing — ids are assigned alphabetically
+   D. Only rare words are affected
+   Answer: B — Token id 3797 indexes row 3797 of the embedding matrix, which was trained to mean whatever 3797 meant in the old vocabulary. Change the merges and every id after the first changed merge refers to a different string. A tokenizer is frozen for the life of the model it was trained with.
+
+---
+
+- Sennrich, Haddow and Birch, "Neural Machine Translation of Rare Words with Subword Units" (2015) — BPE for language models.
+- Andrej Karpathy, *minbpe* (github.com/karpathy/minbpe) and the lecture "Let's build the GPT Tokenizer" — lab 04's design, plus the regex pre-split GPT-2 and GPT-4 use.
+- OpenAI's `tiktoken` and Hugging Face's `tokenizers` are the production implementations; encode the same sentence in several languages with both and compare the counts.
+# M1.L2 — Embeddings and Position
+
+_Track M1: The Transformer · ~17 min · trainingspace_
+
+> An embedding is a lookup table you train. Attention, on its own, cannot tell "dog bites man" from "man bites dog" — so position has to be added, and how it is added decides how far a model can read.
+## Embeddings: a trained lookup table
+
+The first layer of a language model is a matrix `wte` of shape `(V, C)`: one row of C numbers per token in the vocabulary. "Embedding token 3797" means "take row 3797":
+
+```python
+x = wte[idx]          # idx: (B, T) ints  ->  x: (B, T, C)
+```
+
+Mathematically this is a matmul with a one-hot vector — `onehot(3797) @ wte` — which is how gradients flow into it: only the rows of tokens that appeared in the batch receive gradient. Nothing about a row is designed. It starts random (std 0.02 in GPT-2) and training moves tokens that behave alike to nearby rows, because nearby rows produce similar downstream computations.
+
+## Attention cannot see order
+
+Attention (M1.L3) computes, for each token, a weighted average of other tokens' values, with weights from query–key dot products. Shuffle the input tokens and every output is shuffled the same way — nothing else changes. Without help, "dog bites man" and "man bites dog" are the same bag of three vectors. The causal mask leaks a little order (a token knows how many tokens precede it), but not enough. Position has to be injected.
+
+---
+
+## Three ways to add position
+
+**Learned absolute (GPT-2).** A second table `wpe` of shape `(block_size, C)`, added to the token embeddings: `x = wte[idx] + wpe[:T]`. Simple, and lab 06 uses it. GPT-2's is 1,024 × 768 = 786,432 parameters, and it has a hard limit: there is no row 1,025, so the model cannot read beyond the length it was trained with.
+
+**Sinusoidal (the 2017 transformer).** The same addition, but the position vectors are fixed sine and cosine waves of different frequencies instead of learned rows. No parameters, and defined for any position — though models still degrade beyond trained lengths.
+
+**Rotary, RoPE (Llama and most current models).** Nothing is added to x. Instead, inside every attention layer, each query and key vector is **rotated** by an angle proportional to its position, pair of dimensions by pair of dimensions:
+
+```
+for pair i = (dims 2i, 2i+1), at position t:   rotate by  t · θᵢ,   θᵢ = 10000^(−2i/D)
+```
+
+Low pairs rotate fast (θ₀ = 1 radian per position), high pairs slowly (the last pair once in tens of thousands of positions), like the hands of a clock.
+
+---
+
+_fig 1 — why RoPE gives relative position_
+
+Components: q at position m (rotated by m·θ) · k at position n (rotated by n·θ) · q · k (angle between them) · depends on m − n (only the distance)
+
+Steps:
+1. The query of the token at position m has each of its dimension pairs rotated by m·θᵢ. Nothing else about the vector changes; rotations preserve length.
+2. The key of the token at position n is rotated the same way by n·θᵢ.
+3. A dot product between two rotated 2-D vectors depends only on the angle between them: rotating both by the same extra amount changes nothing.
+4. So the score depends on (m − n)·θᵢ: relative position, computed inside attention, with zero parameters. Lab 05's rope-relative check tests exactly this.
+
+---
+
+RoPE's properties are why it won:
+
+- **Relative by construction.** The score between tokens 10 and 3 equals the score between 30 and 23 (for the same content). What matters for language is mostly "how far back", not "at absolute index 512".
+- **No parameters, no length table.** Position is a computation, so there is no row that does not exist.
+- **Extendable.** Because θᵢ is a formula, a model trained at 8k tokens can be adapted to longer contexts by rescaling the angles (raising the base, or interpolating positions) and fine-tuning briefly — the trick behind most long-context releases.
+
+## Tied embeddings
+
+The output layer maps a C-vector back to V scores — a `(C, V)` matrix, the same shape as `wteᵀ`. GPT-2 **ties** them: `logits = x @ wte.T`, so one matrix both reads and writes tokens and the model saves V·C parameters (38.6 M for GPT-2 small, 31% of its total). Larger models usually untie them; at 8B parameters the saving is small and separate matrices train slightly better.
+
+---
+
+**Q1. A model trained with GPT-2-style learned position embeddings and block_size 2,048 is given a 4,000-token input. What happens?**
+   A. It works, slightly worse
+   B. It cannot run as-is: there are no position embeddings for positions 2,048 and beyond — wpe has exactly 2,048 rows
+   C. Positions wrap around automatically
+   D. Attention ignores position, so it works perfectly
+   Answer: B — wpe[:T] needs T rows. Learned absolute embeddings fix the maximum length at training time. RoPE has no such table, which is one reason long-context models use it — though they still need adaptation to work well past their trained length.
+
+**Q2. Why does a transformer with no position information treat "dog bites man" and "man bites dog" almost identically?**
+   A. The tokenizer merges them
+   B. Attention is a weighted average whose weights depend on content only, so permuting the inputs just permutes the outputs — only the causal mask carries any order
+   C. Embeddings are sorted alphabetically
+   D. The MLP removes order
+   Answer: B — Query–key scores are functions of the vectors, not of where they sit. Without position signals the model sees a set of tokens. The causal mask reveals how many tokens precede each one, which is too weak to recover full word order reliably.
+
+**Q3. What does tying the input embedding and the output layer save in GPT-2 small (V = 50,257, C = 768)?**
+   A. 786,432 parameters
+   B. about 38.6 million parameters
+   C. about 85 million parameters
+   D. nothing — they are different shapes
+   Answer: B — The output layer would be another (768, 50,257) matrix: 38,597,376 parameters, about 31% of GPT-2 small's 124.4 M. The shapes are transposes of each other, which is what makes tying possible. 786,432 is the size of wpe.
+
+---
+
+- Su et al., "RoFormer: Enhanced Transformer with Rotary Position Embedding" (2021, arxiv.org/abs/2104.09864).
+- Press and Wolf, "Using the Output Embedding to Improve Language Models" (2016) — weight tying.
+- Chen et al., "Extending Context Window of Large Language Models via Positional Interpolation" (2023) — rescaling RoPE angles for longer context.
+# M1.L3 — Attention
+
+_Track M1: The Transformer · ~22 min · trainingspace_
+
+> Attention is a soft database lookup: every token issues a query, every earlier token offers a key and a value, and the answer is a weighted average. Three matmuls and a softmax — plus one division by √D that decides whether it trains at all.
+Every token in a sequence needs information from other tokens: a pronoun needs its noun, a closing bracket its opening one. Attention lets each position pull in what it needs from every earlier position, with the choice of *what* learned from data.
+
+## Query, key, value
+
+Each token's vector `x` is projected three ways by three learned matrices:
+
+- **query** `q = x @ Wq` — what this token is looking for;
+- **key** `k = x @ Wk` — what this token offers to be found by;
+- **value** `v = x @ Wv` — what this token hands over if it is chosen.
+
+The match between token i's query and token j's key is a dot product. A softmax over j turns token i's matches into weights summing to 1, and token i's output is the weighted average of the values:
+
+```
+scores  = q @ kᵀ / √D           (T, T)   every query against every key
+weights = softmax(scores)       (T, T)   each row sums to 1
+out     = weights @ v           (T, D)   a blend of values per token
+```
+
+It is a key–value lookup where every key matches a little and the result is a blend — differentiable, so training can shape what queries and keys mean.
+
+---
+
+_A lookup you already know_
+
+- **dict lookup: cache[key]** (exactly one key matches; you get exactly its value) ≡ **attention** (every key matches to a degree; you get a weighted blend of all values)
+- **a search engine** (query terms scored against document index terms; results ranked by score) ≡ **q · k** (query vector scored against each key vector; softmax turns scores into weights)
+
+---
+
+## Why divide by √D
+
+If q and k have D independent components of variance 1, their dot product is a sum of D such products and has variance **D**. With D = 64, scores have a standard deviation of 8, and a softmax over numbers spread that widely puts almost all its weight on the largest one. Measured over 200 random rows of 128 keys:
+
+| scores | score variance | largest weight (mean) |
+|---|---|---|
+| q · k | 64.3 | **0.78** |
+| q · k / √64 | 1.0 | **0.071** |
+
+Uniform attention over 128 keys would be 0.008 per key. Unscaled, one random key takes 78% of the weight before anything has been learned. A saturated softmax has near-zero gradients for every other key (O1.L1's tanh problem again), so the model cannot learn to look elsewhere. Dividing by √D restores unit variance and a softmax that can learn.
+
+## The causal mask
+
+A language model predicts token t+1 from tokens 0…t. During training all positions are computed at once, so position t must not see positions after it, or it could copy the answer. Before the softmax, set every score where j > i to −∞; `exp(−∞) = 0` gives those keys exactly zero weight. The mask is a lower-triangular (T, T) pattern — lab 05's `causal_mask` — and its correctness is testable: changing a future token must not change any earlier output (`no-peeking`).
+
+---
+
+_fig 1 — one attention head, causal_
+
+Components: x ((T, C)) · q = x·Wq ((T, D)) · k = x·Wk ((T, D)) · v = x·Wv ((T, D)) · q·kᵀ / √D ((T, T)) · mask + softmax (rows sum to 1) · weights · v ((T, D))
+
+Steps:
+1. Three learned projections turn each token vector into a query, a key and a value. All three are ordinary matmuls over every position at once.
+2. Every query is scored against every key: a (T, T) matrix, scaled by √D so its entries have variance about 1.
+3. Scores for future positions are set to −∞, then each row is softmaxed: token i's weights over tokens 0…i, summing to 1.
+4. Each token's output is its weights times the value vectors: a blend of what the tokens it attended to had to offer.
+
+---
+
+## Many heads
+
+One attention pattern per layer is limiting: a token may need its subject, the previous token, and the matching bracket all at once. **Multi-head attention** splits the C-dimensional projections into H heads of D = C/H dimensions, runs attention independently in each, concatenates the results and mixes them with an output projection `Wo`. Same FLOPs as one wide head — the split is a reshape (lab 05's `split_heads`) — but H independent patterns. GPT-2 small uses 12 heads of 64.
+
+## What it costs
+
+The projections cost what any linear layer costs: about `8·T·C²` FLOPs for q, k, v and the output projection. The new term is the score matrix: `2·T²·D` FLOPs per head for `q·kᵀ` and the same again for `weights·v`. More important is its **memory**: a (T, T) matrix per head, per layer, per sequence. For GPT-2 small at T = 1,024 in bf16, that is 12 heads × 1,024² × 2 bytes ≈ **25 MB per layer per sequence** — the 5·a·s² term in T0.L4's activation formula.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** FlashAttention
+>
+> FlashAttention (Dao et al., 2022) computes exactly the same output without ever writing the (T, T) score matrix to GPU memory: it streams blocks of keys and values through on-chip SRAM and keeps a running softmax (the "online softmax" trick — the same max-shift as O1.L2, updated block by block). Attention memory becomes linear in T instead of quadratic, and because the operation was memory-bound (T0.L3), it also runs several times faster. In PyTorch it is used automatically by `torch.nn.functional.scaled_dot_product_attention` on supported GPUs.
+>
+> Sources: https://arxiv.org/abs/2205.14135 · https://pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html
+
+---
+
+**Hands-on lab 05: Attention, Heads and RoPE** (graded in your browser) — Write a stable softmax, the causal mask, batched scaled dot-product attention, the head split, multi-head attention and RoPE — then prove the mask never leaks the future and that RoPE scores depend only on distance.
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/attention
+
+---
+
+**Q1. A colleague drops the √D scaling "because the model will learn the right scale". With D = 128, what happens at initialisation?**
+   A. Nothing — the softmax is scale-invariant
+   B. Scores have variance about 128, so each softmax row concentrates on one essentially random key and the gradients to the other keys nearly vanish — learning is slow or stalls
+   C. The scores overflow to inf
+   D. Attention becomes uniform
+   Answer: B — Softmax is invariant to adding a constant, not to multiplying. Scores with standard deviation ≈ 11 make the softmax nearly one-hot, and a saturated softmax passes almost no gradient to the keys it ignores. The measured case at D = 64 already put 78% of the weight on one key.
+
+**Q2. Training loss drops to nearly zero within a few hundred steps on a language-modelling task, but generation produces garbage. Which bug fits best?**
+   A. The learning rate is too low
+   B. The causal mask is missing or wrong, so each position can see the token it is supposed to predict and simply copies it
+   C. Too many heads
+   D. The tokenizer vocabulary is too small
+   Answer: B — A leaky mask turns next-token prediction into copying, which is trivially easy, so training loss collapses. At generation time the future does not exist, and the model has learned nothing useful. The no-peeking test catches this in seconds.
+
+**Q3. Doubling the context length from 2,048 to 4,096 multiplies the attention score memory per layer (without FlashAttention) by how much?**
+   A. 1×
+   B. 2×
+   C. 4×
+   D. 8×
+   Answer: C — The score matrix is T × T per head. Doubling T quadruples it. The projections and MLP scale linearly in T, so at long context the quadratic term dominates — the motivation for FlashAttention's linear-memory formulation.
+
+---
+
+- Vaswani et al., "Attention Is All You Need" (2017, arxiv.org/abs/1706.03762) — section 3.2 introduces scaled dot-product and multi-head attention.
+- Jay Alammar, "The Illustrated Transformer" — the same mechanism, drawn.
+- Milakov and Gimelshein, "Online normalizer calculation for softmax" (2018) — the trick FlashAttention is built on.
+# M1.L4 — The Block
+
+_Track M1: The Transformer · ~18 min · trainingspace_
+
+> A GPT is one block repeated: normalise, attend, add; normalise, MLP, add. Attention moves information between tokens; the MLP — two thirds of the parameters — processes each token on its own. Stack it L times and you have the model.
+Everything is in place. A GPT block is the pre-norm residual layer of O1.L5 with attention (M1.L3) in one branch and an MLP (O1.L1) in the other:
+
+```python
+def block(x):                                # x: (B, T, C), the residual stream
+    x = x + attention(layer_norm_1(x))       # mix information ACROSS positions
+    x = x + mlp(layer_norm_2(x))             # transform each position on its own
+    return x
+
+def mlp(h):                                  # GPT-2: expand 4x, GELU, project back
+    return gelu(h @ W_fc + b_fc) @ W_proj + b_proj      # (C -> 4C -> C)
+```
+
+And the model is the block in a loop:
+
+```python
+x = wte[idx] + wpe[:T]                       # (B, T, C)    M1.L2
+for blk in blocks:                           # L times
+    x = blk(x)
+logits = layer_norm_f(x) @ wte.T             # (B, T, V)    tied output, M1.L2
+```
+
+Lab 06 is these ten lines, made exact.
+
+---
+
+## Two kinds of work
+
+The two sub-blocks do different jobs, and it helps to keep them apart:
+
+- **Attention is the only place tokens interact.** It reads other positions' vectors and writes a blend into this position's stream. Without it, each token's prediction would depend on that token alone.
+- **The MLP sees one token at a time.** The same weights apply independently at every position: no information crosses between tokens. It is where most per-token transformation happens — and where interpretability research finds much of a model's stored factual association.
+
+Both write into the **residual stream** by addition. Think of the stream as a C-dimensional bus every layer reads from and writes to; each block adds its contribution and passes the sum on.
+
+## Where the parameters are
+
+For width C (ignoring biases and norms, which are O(C)):
+
+| part | matrices | weights |
+|---|---|---|
+| attention: q, k, v, output | four C × C | **4·C²** |
+| MLP: up and down | C × 4C and 4C × C | **8·C²** |
+| **block** | | **12·C²** |
+
+For GPT-2 small (C = 768): 12 × 768² = 7.08 M per block; the exact count with biases and LayerNorms is 7,087,872. Twelve blocks hold 85 M of the model's 124.4 M parameters; the embeddings hold most of the rest (M1.L5).
+
+---
+
+_fig 1 — the model as a stack_
+
+Components: embed (wte[idx] + wpe) · block 1 (attn + MLP) · … (L blocks) · block L (attn + MLP) · ln_f (final norm) · logits (x · wteᵀ)
+
+Steps:
+1. Token ids become vectors: a row of the token table plus a row of the position table. This (B, T, C) array is the residual stream.
+2. Each block reads the stream, lets tokens exchange information through attention, transforms each token with the MLP, and adds both results back.
+3. The same structure repeats L times with different weights — 12 in GPT-2 small, 32 in an 8B-class model. Depth is how a model composes simple steps into complex ones.
+4. A final LayerNorm, then the embedding matrix used in reverse scores every vocabulary entry at every position: (B, T, V) logits for the cross-entropy loss.
+
+---
+
+> **[vendor snapshot — verified 2026-10]** The Llama-style block
+>
+> Most current open models keep this skeleton and swap three parts: **RMSNorm** instead of LayerNorm (O1.L5), **RoPE** inside attention instead of a position table (M1.L2), and a **SwiGLU** MLP: `(silu(h·W1) ⊙ (h·W3)) · W2`, three matrices instead of two. To keep roughly 8·C² MLP weights, the hidden width shrinks from 4·C to about ⅔·4·C — LLaMA 7B uses C = 4,096 and a hidden width of 11,008. Biases are dropped throughout.
+>
+> Sources: https://arxiv.org/abs/2302.13971 · https://arxiv.org/abs/2002.05202
+
+---
+
+> **[info]** Identical blocks are an engineering choice as much as a modelling one: one kernel configuration, one memory layout and one communication pattern repeated L times. Pipeline parallelism (D1.L5) cuts the stack between blocks; tensor parallelism (D1.L4) splits inside each block the same way L times; activation checkpointing (D1.L6) saves one tensor per block boundary. A uniform stack makes all three simple.
+
+---
+
+**Q1. Which sub-block lets information move from token 3 to token 9?**
+   A. The MLP
+   B. Attention — it is the only operation that reads other positions; the MLP, LayerNorm and residual adds act on each position separately
+   C. The final LayerNorm
+   D. The embedding
+   Answer: B — MLPs, norms and residual additions are position-wise: the same function applied independently at each token. Only attention combines vectors from different positions. Remove it and each prediction depends on one token.
+
+**Q2. A GPT block has C = 4,096. Roughly how many weights are in its MLP (GPT-2 style, 4× expansion)?**
+   A. 16.8 M
+   B. 67 M
+   C. 134 M
+   D. 201 M
+   Answer: C — 8·C² = 8 × 4,096² ≈ 134 M. Attention adds 4·C² ≈ 67 M, for about 201 M per block. Thirty-two such blocks is about 6.4 B — most of a "7B" model.
+
+**Q3. Why does the block ADD each sub-block's output to x instead of replacing x?**
+   A. Addition is cheaper than assignment
+   B. The residual stream keeps an identity path for the gradient through every block (O1.L5) and lets each block make an incremental contribution rather than rebuild the representation
+   C. It halves the parameter count
+   D. It makes attention causal
+   Answer: B — x + f(x) has derivative 1 + f'(x), so gradients reach early blocks undiminished, and each block only has to learn a correction. Replacing x would make the stack a plain deep network, which does not train at this depth.
+
+---
+
+- Radford et al., "Language Models are Unsupervised Multitask Learners" (GPT-2, 2019) — the pre-norm change and the final LayerNorm.
+- Shazeer, "GLU Variants Improve Transformer" (2020, arxiv.org/abs/2002.05202) — SwiGLU.
+- Andrej Karpathy, *nanoGPT* (github.com/karpathy/nanoGPT) `model.py` — the same block in PyTorch in about 100 lines; compare it with lab 06.
+# M1.L5 — Counting a GPT
+
+_Track M1: The Transformer · ~17 min · trainingspace_
+
+> From five numbers in a config — vocabulary, context, layers, heads, width — you can derive a model's parameter count to the last digit, its memory, and the FLOPs of every token it will ever process. Do it once by hand and every model card becomes readable.
+GPT-2 small's config: V = 50,257, T = 1,024, L = 12, H = 12, C = 768. Count every array lab 06's `init_params` creates:
+
+| part | shape | parameters |
+|---|---|---|
+| token embedding `wte` | 50,257 × 768 | 38,597,376 |
+| position embedding `wpe` | 1,024 × 768 | 786,432 |
+| per block: ln1 (g, b) | 2 × 768 | 1,536 |
+| per block: attention qkv + bias | 768 × 2,304 + 2,304 | 1,771,776 |
+| per block: attention output + bias | 768 × 768 + 768 | 590,592 |
+| per block: ln2 (g, b) | 2 × 768 | 1,536 |
+| per block: MLP up + bias | 768 × 3,072 + 3,072 | 2,362,368 |
+| per block: MLP down + bias | 3,072 × 768 + 768 | 2,360,064 |
+| **one block** | | **7,087,872** |
+| 12 blocks | | 85,054,464 |
+| final LayerNorm | 2 × 768 | 1,536 |
+| output layer | tied to `wte` | 0 |
+| **total** | | **124,439,808** |
+
+That number is the "124M" in "GPT-2 124M", and lab 06's `count_params` must hit it exactly.
+
+---
+
+- **12·L·C²** — blocks, approx. (12 × 12 × 768² = 84.9 M against an exact 85.1 M — biases and norms are the difference)
+- **31%** — embeddings, GPT-2 small (38.6 M of 124.4 M — at small widths the vocabulary is a big share)
+- **2·N** — forward FLOPs / token (one multiply-add per weight per token, plus attention's T-dependent term)
+- **6·N** — training FLOPs / token (forward + backward ≈ 3× forward (A1.L2) — the basis of P1.L4)
+
+---
+
+## The shortcut: 12·L·C²
+
+Biases and norms are O(C) per block; the matrices are O(C²). Dropping the small terms, each block is 12·C² (M1.L4), so:
+
+```
+N ≈ 12 · L · C²  +  V · C          (blocks + embedding)
+```
+
+This is accurate to a fraction of a percent for the blocks, and it explains how models scale: **doubling the width quadruples** the parameters per layer, doubling the depth doubles them. As models grow, the V·C embedding term shrinks in relative terms — 31% of GPT-2 small, a few percent of a 70B model.
+
+## FLOPs per token
+
+Every weight in a matmul participates in one multiply and one add per token that passes through it (T0.L3). So a forward pass costs about **2·N FLOPs per token**. Attention adds a term that grows with context — computing scores against T earlier keys and blending T values — of about 2·L·T·C per token. For GPT-2 small at T = 1,024 that is 18.9 M against 2N = 249 M: about 8%. For long contexts or small models it matters; for most training budgets it is folded into the approximation.
+
+Measured with lab 06's numpy forward pass on GPT-2 small's shapes (random float32 weights), the reference laptop processed a 1,024-token sequence in **1.56 s** — 656 tokens/s, or about **160 GFLOP/s** by the 2·N rule. The same laptop's matmul peak was 2 TFLOP/s (T0.L3); the difference is LayerNorm, softmax and GELU at memory speed, float32 temporaries, and numpy's single-operation-at-a-time execution — exactly the overheads PyTorch's fused kernels exist to remove.
+
+---
+
+```python
+def count_params(V, T, L, C):
+    per_block = 12 * C * C + 13 * C      # 4 attention + 8 MLP weight matrices, biases + 2 norms
+    return V * C + T * C + L * per_block + 2 * C
+
+count_params(50257, 1024, 12, 768)       # 124,439,808
+```
+
+---
+
+Check the 13·C: biases are 3C (qkv) + C (attention out) + 4C (MLP up) + C (MLP down) = 9C, and the two LayerNorms add 4C. Lab 06 asks you to derive it yourself; the code above is the answer, so do the derivation first.
+
+## Memory, from the count
+
+T0.L4's rule turns the count into bytes. GPT-2 small: 124.4 M × 2 bytes = 249 MB of bf16 weights to run, and 124.4 M × 16 = **2.0 GB** of training state before activations. A laptop can train it — the capstone's model is smaller still.
+
+---
+
+**Hands-on lab 06: A GPT Forward Pass** (graded in your browser) — Assemble LayerNorm, GELU, the pre-norm block and tied embeddings into a GPT-2-architecture forward pass that matches a reference to 10⁻⁸, derive count_params until it says 124,439,808, then add greedy decoding and temperature, top-k and top-p sampling (M1.L6).
+
+Guide: https://promiseowolabi.github.io/trainingspace/labs/gpt-forward
+
+---
+
+**Q1. A model has L = 32, C = 4,096 and V = 32,000 with untied embeddings. Approximately how many parameters?**
+   A. about 1.3 B
+   B. about 6.7 B
+   C. about 13 B
+   D. about 4.3 B
+   Answer: B — 12 × 32 × 4,096² ≈ 6.44 B for the blocks, plus two V·C embedding matrices (input and untied output) of 131 M each: ≈ 6.7 B. These are LLaMA-7B's shapes; its published count is 6.7 B.
+
+**Q2. You double a model's width C and keep everything else fixed. Roughly what happens to its block parameters and its forward FLOPs per token?**
+   A. Both double
+   B. Both quadruple
+   C. Parameters quadruple, FLOPs double
+   D. Parameters double, FLOPs quadruple
+   Answer: B — Block parameters are 12·L·C², so doubling C multiplies them by 4. Forward FLOPs are about 2N per token, so they also quadruple. Width is the expensive knob; depth scales both linearly.
+
+**Q3. What does "a forward pass costs 2N FLOPs per token" leave out?**
+   A. Nothing — it is exact
+   B. The attention score and blend computations, which grow with context length (about 2·L·T·C per token), plus cheap elementwise operations
+   C. The embedding lookup, which costs V·C FLOPs
+   D. The backward pass, which is free
+   Answer: B — 2N counts the matmuls with weights. Attention's q·kᵀ and weights·v involve no parameters but cost FLOPs proportional to T. An embedding lookup is indexing, not a matmul, so it costs almost nothing despite holding V·C parameters.
+
+---
+
+- Kaplan et al., "Scaling Laws for Neural Language Models" (2020, arxiv.org/abs/2001.08361), Table 1 — the parameter and FLOP accounting, term by term, including the attention term.
+- Load a real model card's config (any Hugging Face `config.json`) and predict its parameter count before reading it.
+- P1.L4 turns 6·N per token into the cost of a whole training run.
+# M1.L6 — Sampling
+
+_Track M1: The Transformer · ~15 min · trainingspace_
+
+> Training only ever asks the model for a probability distribution over the next token. Generation is what you do with that distribution — and temperature, top-k and top-p are three small edits to it that change the text completely.
+## From a loss to a generator
+
+Training minimises cross-entropy at every position: make `p(next token | previous tokens)` assign high probability to what actually came next. Nothing in the loss mentions generating text. But a model that has learned `p(token_t | tokens_<t)` well can produce text by **using its own predictions as input**:
+
+```python
+seq = prompt_ids
+for _ in range(max_new):
+    logits = model(seq[-block_size:])[-1]     # distribution for the NEXT token only
+    seq.append(choose(logits))               # greedy or sampled
+```
+
+This is **autoregressive** generation. The model was trained on every position in parallel (the causal mask made that honest, M1.L3); it generates one token at a time because each new token depends on the one before.
+
+## Greedy: always take the top token
+
+`choose = argmax`. Deterministic, and usually bad for open-ended text: it falls into loops ("the the the", or the same sentence repeated), because once a repetition is the most likely continuation it stays the most likely. Greedy is fine for short, constrained outputs — a classification label, a single number.
+
+## Temperature
+
+Divide the logits by T before the softmax. For the logits `[3, 2, 1, 0.5, −1]`:
+
+| temperature | probabilities | top token | perplexity |
+|---|---|---|---|
+| 0.5 | 0.862, 0.117, 0.016, 0.006, 0.000 | **0.86** | 1.61 |
+| 1.0 | 0.624, 0.229, 0.084, 0.051, 0.011 | 0.62 | 2.84 |
+| 2.0 | 0.417, 0.253, 0.154, 0.120, 0.056 | 0.42 | 4.12 |
+
+Below 1 the distribution sharpens towards greedy (T → 0 *is* greedy); above 1 it flattens towards uniform. Perplexity here is exp(entropy): "as uncertain as choosing among this many options".
+
+---
+
+## Truncation: top-k and top-p
+
+A 50,000-token vocabulary has a long tail: thousands of tokens each with tiny probability that together can hold a few percent of the mass. Sample a long text and you will hit the tail eventually, and one absurd token derails everything after it. Truncation removes the tail before sampling:
+
+- **top-k**: keep the k most likely tokens, renormalise. Simple, but k is the same whether the model is confident (where k = 40 keeps junk) or uncertain (where k = 40 cuts real options).
+- **top-p (nucleus)**: keep the smallest set of top tokens whose probabilities add up to p (say 0.9), renormalise. The kept set shrinks when the model is confident and grows when it is not.
+
+In the T = 1 row above, top-p 0.8 keeps the first two tokens (0.624 alone is short of 0.8; 0.853 reaches it). Lab 06's `sample_next` implements all three, in the order temperature → top-k → softmax → top-p, and checks the result statistically over thousands of draws.
+
+---
+
+_fig 1 — one decoding step_
+
+Components: logits ((V,)) · ÷ temperature (sharpen/flatten) · top-k (keep k) · softmax (probabilities) · top-p (keep mass p) · draw (append id)
+
+Steps:
+1. The model produces one logit per vocabulary entry for the last position. Everything after this is post-processing; the model has finished its work.
+2. Dividing by the temperature rescales how far apart the logits are: smaller temperature, larger gaps, a more peaked distribution.
+3. Top-k sets every logit outside the k largest to −∞; the softmax then gives them exactly zero probability.
+4. Top-p sorts the probabilities and keeps the shortest prefix whose mass reaches p, then renormalises. One random draw picks the token, which is appended to the sequence for the next step.
+
+---
+
+> **[warning]** Temperature and truncation reshape a distribution the model has already computed; they cannot add knowledge. When an evaluation compares two models, fix the decoding settings — or use greedy — or the comparison measures the settings. Likewise, a run's validation **loss** (computed on the full distribution, no sampling) is the clean training signal; sampled text is a sanity check, not a metric.
+
+---
+
+**Q1. A greedy-decoded story repeats the same sentence forever. What is the most direct fix?**
+   A. Train for longer
+   B. Sample instead of taking the argmax — e.g. temperature 0.8 with top-p 0.9 — so a repetition that is merely the most likely continuation is not chosen every time
+   C. Increase the context length
+   D. Use a larger vocabulary
+   Answer: B — Greedy decoding always takes the mode, and repetitive continuations often are the mode once a loop starts. Sampling breaks the loop by sometimes choosing other likely tokens. Repetition penalties are another option; more training rarely removes greedy loops.
+
+**Q2. Why is top-p usually preferred to top-k for open-ended text?**
+   A. It is faster to compute
+   B. Its cut-off adapts to the model's confidence: when one token dominates it keeps very few, when many are plausible it keeps many — a fixed k is too loose in the first case and too tight in the second
+   C. It never changes the distribution
+   D. It does not need a softmax
+   Answer: B — top-k keeps a fixed count regardless of how the probability is spread. top-p keeps a fixed amount of probability mass, so the number of candidates follows the model's uncertainty.
+
+**Q3. A team reports that model A beats model B on a creative-writing evaluation. A was sampled at temperature 0.7, B at 1.2. What should you ask?**
+   A. Nothing — temperature does not affect quality
+   B. For a comparison at matched decoding settings: different temperatures change outputs systematically, so the result may measure the settings rather than the models
+   C. Whether B used top-k
+   D. Which tokenizer they used
+   Answer: B — Temperature reshapes every distribution: lower is more conservative and coherent, higher more varied and error-prone. Evaluations must fix decoding parameters (or sweep them for both models) before attributing a difference to the weights.
+
+---
+
+- Holtzman et al., "The Curious Case of Neural Text Degeneration" (2019, arxiv.org/abs/1904.09751) — nucleus (top-p) sampling and why greedy text degenerates.
+- Generation recomputes the whole prefix every step in lab 06. Production inference caches each layer's keys and values (the KV cache) so each new token costs one position's worth of work — a serving topic, outside this course.
+- This closes M1. P1 moves the model to PyTorch and trains it.

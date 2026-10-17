@@ -1,0 +1,167 @@
+import type { Lesson } from '../types'
+
+const lesson: Lesson = {
+  id: 't0.l3',
+  slug: 'the-cost-of-a-matmul',
+  trackId: 't0',
+  index: 3,
+  title: 'The Cost of a Matmul',
+  minutes: 17,
+  hook: 'Training a model is, to a first approximation, a very long list of matrix multiplications. Count their FLOPs and their bytes and you can predict whether a GPU will be busy or waiting — before you run anything.',
+  exercise: 'read+quiz',
+  takeaway: {
+    number: '2·m·k·n FLOPs',
+    claim: 'An (m, k) × (k, n) matmul costs 2·m·k·n FLOPs and moves about m·k + k·n + m·n elements; their ratio, arithmetic intensity, decides whether the hardware is compute-bound or memory-bound.',
+  },
+  blocks: [
+    {
+      type: 'prose',
+      md: `In a transformer, more than 95% of the arithmetic is matrix multiplication: every linear layer, every attention projection, the output layer. Everything else — activations, normalisation, softmax — is cheap to compute but, as you will see, not cheap to *move*. So the cost model of training starts with one operation.
+
+## Counting the FLOPs
+
+\`C = A @ B\` with \`A\` of shape \`(m, k)\` and \`B\` of shape \`(k, n)\`. Each of the **m·n** outputs is a dot product of length **k**: k multiplies and k adds (k − 1, but nobody counts that closely). So
+
+\`\`\`
+FLOPs(matmul) = 2 · m · k · n
+\`\`\`
+
+A FLOP here is one floating-point add or multiply. A linear layer applied to a batch of B vectors is the same matmul with m = B: **2·B·d_in·d_out** FLOPs. P1.L4 builds the famous \`6·N·D\` training estimate out of exactly this term.`,
+    },
+    {
+      type: 'statline',
+      stats: [
+        { value: '85 MFLOP/s', label: 'Python loop dot', hint: 'sum(a*b for a, b in zip(x, y)) on 10⁶ floats, CPython 3.12, reference laptop' },
+        { value: '21 GFLOP/s', label: 'numpy dot', hint: 'the same 10⁶-element dot product with x @ y' },
+        { value: '2.0 TFLOP/s', label: 'numpy matmul', hint: '2048 × 2048 float32 matmul, numpy 2.5 on an Apple M5 (10 cores)' },
+        { value: '~24,000×', label: 'loop → matmul', hint: '2.0 TFLOP/s ÷ 85 MFLOP/s, same machine' },
+      ],
+    },
+    {
+      type: 'prose',
+      md: `Those are measurements from the reference laptop. The spread is the whole argument for writing training code with arrays: the same multiply-adds run 24,000 times faster when they are expressed as one matmul than as a Python loop. But notice also that the numpy **dot product** is 100× slower than the numpy **matmul**, even though both are compiled code. That gap is not about Python. It is about bytes.
+
+## Counting the bytes
+
+To multiply, the processor has to read A and B from memory and write C back. If each element crosses memory once:
+
+\`\`\`
+bytes(matmul) ≈ bytes_per_element · (m·k + k·n + m·n)
+\`\`\`
+
+The ratio of the two counts is the **arithmetic intensity** — FLOPs per byte moved:
+
+| operation | FLOPs | bytes (bf16) | intensity |
+|---|---|---|---|
+| dot product, length k | 2k | 2·2k | **0.5** |
+| matrix × vector, (n, n)·(n,) | 2n² | ≈ 2n² | **≈ 1** |
+| square matmul, n = 4096 | 2n³ | 2·3n² | **n/3 ≈ 1365** |
+| linear layer, batch B, d ≫ B | 2·B·d² | ≈ 2d² | **≈ B** |
+
+A square matmul does n/3 operations for every byte it touches; a dot product does half an operation. Lab 00's \`arithmetic_intensity\` computes this column.`,
+    },
+    {
+      type: 'prose',
+      md: `## The roofline: which limit you hit
+
+Every processor has two speed limits: a peak compute rate (FLOP/s) and a peak memory bandwidth (bytes/s). Divide them and you get its **ridge point** — the intensity at which the two limits meet:
+
+- below the ridge an operation is **memory-bound**: the arithmetic units wait for data, and FLOP/s = intensity × bandwidth;
+- above it the operation is **compute-bound**: memory keeps up, and FLOP/s is the peak.
+
+On the reference laptop the matrix-vector product above ran at **36 GFLOP/s while moving 72.6 GB/s** — bandwidth-limited, with the arithmetic units mostly idle. The square matmul ran at 2,000 GFLOP/s. Same library, same cores, 55× apart, entirely because of intensity.`,
+    },
+    {
+      type: 'vendor',
+      snapshot: '2026-10',
+      title: 'An H100\'s ridge point',
+      md: `An NVIDIA H100 SXM is specified at about **989 TFLOP/s** of dense bf16 tensor-core compute (the often-quoted 1,979 assumes 2:4 sparsity) and **3.35 TB/s** of HBM3 bandwidth, with 80 GB of memory. The ridge point is therefore
+
+989 × 10¹² ÷ 3.35 × 10¹² ≈ **295 FLOP per byte**.
+
+An operation needs about 300 FLOPs per byte moved before the GPU's compute is the bottleneck. By the table above, a linear layer reaches that only when it processes **about 300 rows at once**.`,
+      systems: ['nvidia-h100'],
+      sources: [
+        'https://www.nvidia.com/en-us/data-center/h100/',
+        'https://portal.mlcloud.uni-tuebingen.de/user-guide/_specs/gpu/h100/',
+      ],
+    },
+    {
+      type: 'diagram',
+      caption: 'fig 1 — the roofline',
+      height: 66,
+      nodes: [
+        { id: 'dot', x: 2, y: 46, w: 20, h: 12, label: 'dot product', sub: 'intensity 0.5' },
+        { id: 'mv', x: 26, y: 34, w: 20, h: 12, label: 'matrix × vector', sub: 'intensity ≈ 1' },
+        { id: 'ridge', x: 50, y: 18, w: 20, h: 12, label: 'ridge point', sub: '≈ 295 on H100' },
+        { id: 'mm', x: 76, y: 4, w: 22, h: 12, label: 'square matmul', sub: 'intensity n/3' },
+        { id: 'bw', x: 2, y: 4, w: 30, h: 12, label: 'memory roof', sub: 'FLOP/s = I × bandwidth' },
+        { id: 'peak', x: 76, y: 46, w: 22, h: 12, label: 'compute roof', sub: 'FLOP/s = peak' },
+      ],
+      edges: [
+        { from: 'dot', to: 'mv' },
+        { from: 'mv', to: 'ridge' },
+        { from: 'ridge', to: 'mm' },
+      ],
+      steps: [
+        { caption: 'Plot achievable FLOP/s against arithmetic intensity. At low intensity the line rises with slope = memory bandwidth: every extra FLOP per byte is free speed.', active: ['bw', 'dot', 'mv'], edges: ['dot->mv'] },
+        { caption: 'A dot product and a matrix-vector product sit at the far left. They run at a tiny fraction of peak no matter how fast the arithmetic units are.', active: ['dot', 'mv'] },
+        { caption: 'At the ridge point — peak FLOP/s divided by bandwidth — the slope meets the flat compute roof. On an H100 that is about 295 FLOPs per byte.', active: ['ridge'], edges: ['mv->ridge'] },
+        { caption: 'Large matmuls live to the right of the ridge, at the compute roof. Training is fast because it batches enough tokens to push its matmuls here.', active: ['mm', 'peak'], edges: ['ridge->mm'] },
+      ],
+    },
+    {
+      type: 'prose',
+      md: `## Why this decides how models are trained
+
+**Training batches tokens to climb the roofline.** A training step pushes B sequences of T tokens through every linear layer at once — the "m" of each matmul is B·T, typically hundreds of thousands. Intensity ≈ B·T, far right of the ridge: training matmuls are compute-bound, which is why training efficiency is quoted as a fraction of peak FLOP/s (MFU, P1.L4).
+
+**The cheap operations are the expensive ones.** A LayerNorm or a GELU does a handful of FLOPs per element and reads and writes every element: intensity around 1. On a GPU it runs at memory speed, so a model's elementwise operations can take a noticeable share of step time while doing well under 1% of its FLOPs. **Kernel fusion** — doing several elementwise operations in one pass over memory — exists to fix exactly this, and it is what \`torch.compile\` and FlashAttention do (P1.L2, M1.L3).
+
+**Generating text is the opposite regime.** Producing one token at a time multiplies every weight matrix by a single vector: intensity ≈ 1, deep in memory-bound territory. That is a serving problem, not a training one; this course stays on the training side of the roofline.`,
+    },
+    {
+      type: 'callout',
+      variant: 'analogy',
+      title: 'Batching your database writes',
+      md: `You already know this trade. One \`INSERT\` per row spends its time on round trips; a batch of 1,000 rows in one statement amortises the fixed cost of moving data and runs near the disk's real throughput. Arithmetic intensity is the same idea with "round trip" replaced by "bytes moved from memory": batch enough work per byte and the expensive resource is finally the bottleneck.`,
+    },
+    {
+      type: 'quiz',
+      questions: [
+        {
+          q: 'How many FLOPs does one linear layer with d_in = 4096 and d_out = 11008 cost for a batch of 8 sequences of 2048 tokens (forward only)?',
+          options: ['about 9.2 × 10⁷', 'about 1.5 × 10¹²', 'about 7.4 × 10¹¹', 'about 2.9 × 10¹³'],
+          correct: [1],
+          explanation: 'The batch flattens to m = 8 × 2048 = 16,384 rows. 2 · m · k · n = 2 × 16,384 × 4,096 × 11,008 ≈ 1.48 × 10¹². The tempting 7.4 × 10¹¹ forgets the factor of 2: every term of a dot product is a multiply AND an add.',
+        },
+        {
+          q: 'A teammate profiles a step and finds LayerNorm takes 8% of the time but under 0.5% of the FLOPs. What is the right reading?',
+          options: [
+            'The profiler is wrong — FLOPs are time',
+            'LayerNorm is memory-bound: it reads and writes every activation for a few FLOPs each, so it runs at bandwidth speed, not compute speed — fusing it with neighbouring operations is the fix',
+            'LayerNorm should be removed from the model',
+            'The GPU has a slow LayerNorm unit',
+          ],
+          correct: [1],
+          explanation: 'Elementwise and reduction operations have intensity near 1, so their time is set by bytes moved, not by FLOPs. Their share of time can be many times their share of FLOPs. Fusion — computing several of them in one pass over memory — reduces the bytes, which is the cost that matters.',
+        },
+        {
+          q: 'On an H100 (ridge ≈ 295 FLOP/byte in bf16), roughly how many rows must a (rows, 8192) × (8192, 8192) matmul process before it stops being memory-bound?',
+          options: ['about 3', 'about 30', 'about 300', 'about 30,000'],
+          correct: [2],
+          explanation: 'With d ≫ rows, bytes ≈ 2·d² (the weight matrix dominates) and FLOPs = 2·rows·d², so intensity ≈ rows. It crosses the ridge at about 295 rows. Fewer rows and the GPU waits on HBM to stream the weights; this is why training uses large token batches.',
+        },
+      ],
+    },
+    {
+      type: 'deepdive',
+      title: 'Going deeper',
+      md: `- Williams, Waterman and Patterson, "Roofline: An Insightful Visual Performance Model for Multicore Architectures" (CACM, 2009) — the original roofline paper.
+- Horace He, "Making Deep Learning Go Brrrr From First Principles" (horace.io/brrr_intro.html) — compute, memory and overhead as the three regimes of a training step.
+- Measure your own machine: time \`a @ b\` for n = 64, 512, 2048 and \`a @ v\` for a matrix-vector product, and compute FLOP/s = 2·n³ / seconds. Your ridge point is the ratio of the best matmul rate to the matrix-vector bandwidth.`,
+    },
+  ],
+}
+
+export default lesson

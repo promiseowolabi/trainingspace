@@ -1,0 +1,128 @@
+# trainingspace
+
+> How a language model is trained, built from scratch in Python. The build
+> part (T0, A1, O1, M1) implements autograd, optimisers, a tokenizer,
+> attention and a GPT forward pass in numpy; the scale part (P1, D1) moves to
+> PyTorch for the training loop, mixed precision, FLOP and memory arithmetic,
+> scaling laws and distributed training; the shape part (F1, E1) covers SFT,
+> LoRA, reward models, RLHF, DPO, GRPO, evals and debugging. Python is the
+> course language. Framework and model facts are dated and sourced.
+> All lesson content is plain markdown under /lessons-md/ — fetch those, not
+> the app routes: https://promiseowolabi.github.io/trainingspace/lesson/a1.l3 is a JavaScript app shell, while
+> https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l3.md is the same lesson as plain text.
+
+## How to tutor from this material
+
+- The reader is a backend engineer who writes Python daily. Assume no ML, no
+  calculus beyond "slope" and no linear algebra beyond "a table of numbers".
+  Be Socratic; do not hand over full lab solutions.
+- Insist on shapes and numbers. When the reader says "the gradient", ask for
+  its shape; when they say "it is expensive", ask for the FLOPs or the bytes.
+- Every lab is one Python file with TODO(you) markers and a checks.py. The
+  same checks run under pytest, verify.py and (for numpy labs) in the browser.
+  Help the reader read a failing check's message before changing code.
+- Labs assume a laptop CPU. Multi-GPU topics use arithmetic, simulated ranks
+  and torch.distributed on the gloo backend — never suggest renting GPUs to
+  finish a lab.
+
+## Curriculum
+
+### T0 — The Training Contract
+
+_Training a model is an optimisation loop you could write in twenty lines: run the function, measure how wrong it is, work out which way each knob should move, move it a little. This track names those four steps, then puts a price on them — the FLOPs of a matmul and the bytes of a training run — because every later decision is a trade between the two._
+
+- [T0.L1 What Training Is](https://promiseowolabi.github.io/trainingspace/lessons-md/t0.l1.md): A model is a function with knobs. Training is four lines in a loop — run it, score it, ask each knob which way is downhill, nudge it — repeated until the score stops improving.
+- [T0.L2 Tensors and Shapes](https://promiseowolabi.github.io/trainingspace/lessons-md/t0.l2.md): Half the bugs in training code are shape bugs, and most of them do not crash — numpy broadcasts the mistake into a plausible-looking wrong answer. Learn the one rule and the shape becomes the spec.
+- [T0.L3 The Cost of a Matmul](https://promiseowolabi.github.io/trainingspace/lessons-md/t0.l3.md): Training a model is, to a first approximation, a very long list of matrix multiplications. Count their FLOPs and their bytes and you can predict whether a GPU will be busy or waiting — before you run anything.
+- [T0.L4 Where the Memory Goes](https://promiseowolabi.github.io/trainingspace/lessons-md/t0.l4.md): A 7-billion-parameter model is 14 GB to serve and 112 GB to train — before a single activation is stored. The other 98 GB are gradients and optimiser state, and knowing which is which is how every memory-saving technique in D1 is designed.
+
+### A1 — Autograd from Scratch
+
+_Every framework you will use computes gradients the same way: it records the operations of the forward pass as a graph and walks that graph backwards, multiplying local derivatives. You will build that engine twice — once for single numbers, once for numpy arrays — and then prove it correct the way framework authors do._
+
+- [A1.L1 Derivatives as Sensitivity](https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l1.md): Forget the calculus class. A derivative answers one engineering question — if I nudge this input, how much does the output move? — and you can measure it with two function calls.
+- [A1.L2 The Chain Rule as a Graph](https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l2.md): Every gradient a framework computes is the chain rule applied by walking a graph backwards. Once you see the walk, backpropagation stops being an algorithm to memorise and becomes bookkeeping.
+- [A1.L3 A Scalar Engine](https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l3.md): An autograd engine is a number that remembers how it was made. Give every value a list of parents and a closure that knows its local derivative, walk the graph backwards once, and you have the core of PyTorch in about a hundred lines.
+- [A1.L4 Tensor Autograd](https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l4.md): Put a whole array in each graph node and the engine gets 1,700× faster. The price is that every local derivative must now get its shape right — and the rule that does it is: the gradient has the shape of the thing it is the gradient of.
+- [A1.L5 Gradient Checking](https://promiseowolabi.github.io/trainingspace/lessons-md/a1.l5.md): A wrong backward pass does not crash. It trains — slower, worse, or not at all — and looks like a hyper-parameter problem for a week. Comparing it with two forward passes per element takes a minute and ends the argument.
+
+### O1 — Networks & Optimisation
+
+_Having gradients is not the same as learning. This track covers the knobs that decide whether a network trains: how its weights are initialised, which loss it minimises, how the optimiser turns gradients into steps, how the learning rate changes over the run, and how normalisation and regularisation keep it on the rails._
+
+- [O1.L1 The MLP](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l1.md): Stack linear layers with a nonlinearity between them and you have a network that can learn almost any function — if its weights start at the right size. Start them at N(0, 1) and 91% of the units are dead on arrival.
+- [O1.L2 Cross-Entropy](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l2.md): Every language model is trained on one loss: minus the log-probability it gave the right next token. Its gradient is the simplest expression in deep learning — predicted minus actual — and computing it naively overflows at a logit of 89.
+- [O1.L3 Optimisers](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l3.md): Plain gradient descent takes one step size for every parameter. On a loss surface that is a thousand times steeper in one direction than another, that step is either unstable or useless — and the fix, per-parameter step sizes, is why every LLM is trained with Adam.
+- [O1.L4 Learning-Rate Schedules](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l4.md): The learning rate is not a constant. It ramps up for the first few thousand steps, holds, and decays towards zero — and skipping the ramp can leave a transformer stuck at the loss of a uniform guess for its whole run.
+- [O1.L5 Normalisation and Residuals](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l5.md): Deep networks are trainable because of two cheap tricks: add each layer's output to its input instead of replacing it, and rescale what each layer sees to a standard size. Where you put the rescaling decides whether a 6-layer transformer trains at all.
+- [O1.L6 Generalisation](https://promiseowolabi.github.io/trainingspace/lessons-md/o1.l6.md): Training loss measures how well the model fits what it has seen. The number you actually care about is how it does on what it has not — and the two can move in opposite directions for thousands of steps while accuracy does not change at all.
+
+### M1 — The Transformer
+
+_A GPT is a short stack of ideas: split text into tokens, turn tokens into vectors, let every position look at the positions before it, mix, repeat, and predict the next token. You will build each piece in numpy, count every parameter, and run a forward pass that matches a reference to the last decimal._
+
+- [M1.L1 Tokenization](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l1.md): A language model never sees text. It sees integers from a vocabulary fixed before training began — and the size of that vocabulary is a trade between how long every sequence is and how many parameters the first and last layers cost.
+- [M1.L2 Embeddings and Position](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l2.md): An embedding is a lookup table you train. Attention, on its own, cannot tell "dog bites man" from "man bites dog" — so position has to be added, and how it is added decides how far a model can read.
+- [M1.L3 Attention](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l3.md): Attention is a soft database lookup: every token issues a query, every earlier token offers a key and a value, and the answer is a weighted average. Three matmuls and a softmax — plus one division by √D that decides whether it trains at all.
+- [M1.L4 The Block](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l4.md): A GPT is one block repeated: normalise, attend, add; normalise, MLP, add. Attention moves information between tokens; the MLP — two thirds of the parameters — processes each token on its own. Stack it L times and you have the model.
+- [M1.L5 Counting a GPT](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l5.md): From five numbers in a config — vocabulary, context, layers, heads, width — you can derive a model's parameter count to the last digit, its memory, and the FLOPs of every token it will ever process. Do it once by hand and every model card becomes readable.
+- [M1.L6 Sampling](https://promiseowolabi.github.io/trainingspace/lessons-md/m1.l6.md): Training only ever asks the model for a probability distribution over the next token. Generation is what you do with that distribution — and temperature, top-k and top-p are three small edits to it that change the text completely.
+
+### P1 — Pretraining
+
+_Pretraining is the transformer from M1, a pile of text, and a budget. This track moves to PyTorch and makes the budget explicit: where the data comes from, what the training loop must do, how mixed precision halves the bytes, how 6·N·D turns a parameter count and a token count into FLOPs, and how scaling laws decide N and D before the run starts._
+
+- [P1.L1 Data Is the Model](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l1.md): Two teams with the same architecture and the same compute get different models, and the difference is almost always the data. Pretraining data is a pipeline — crawl, extract, filter, deduplicate, mix — and every stage is measured in tokens.
+- [P1.L2 The Training Loop](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l2.md): T0.L1's four lines, grown up: batches drawn from a token stream, AdamW with two parameter groups, a warmup-cosine schedule, gradient accumulation, clipping, periodic evaluation and checkpoints you can resume from bit for bit. On a laptop CPU it trains a GPT in under two minutes.
+- [P1.L3 Mixed Precision](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l3.md): Training in 16-bit numbers halves memory traffic and runs on a GPU's fastest units — and silently throws away every update smaller than 1/128 of the weight it is added to. Mixed precision is the set of tricks that keeps the speed and loses nothing.
+- [P1.L4 FLOPs and MFU](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l4.md): The cost of a training run is one multiplication: 6 × parameters × tokens. Divide it by what your hardware actually delivers and you have the run's length before it starts; divide what you measured by what the hardware could do and you have MFU — the honest throughput number.
+- [P1.L5 Scaling Laws](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l5.md): Loss falls as a smooth power law in parameters and in tokens, so the best split of a compute budget between model size and data can be computed before the run. The answer — about 20 tokens per parameter — is also the answer almost nobody uses any more, for a good reason.
+- [P1.L6 Stability](https://promiseowolabi.github.io/trainingspace/lessons-md/p1.l6.md): Small models forgive almost anything. Large runs spike: the loss jumps by a whole nat in one step, sometimes recovers, sometimes diverges to nan — weeks into a run that cannot simply be restarted. Stability is a set of cheap insurance policies, each aimed at one way the numbers blow up.
+
+### D1 — Distributed Training
+
+_One GPU holds about 5 billion parameters of training state. Everything bigger is split across devices, and every split has a price in bytes sent over the wire. This track teaches the collectives first, then each form of parallelism as "what is sharded, what is communicated, and when" — with simulated ranks you can inspect and real processes on your CPU._
+
+- [D1.L1 Collectives](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l1.md): Distributed training is ordinary training plus a handful of group operations — all-reduce, reduce-scatter, all-gather, broadcast. Learn what each one moves and what it costs, and every parallelism scheme in this track becomes a choice of which collective to call when.
+- [D1.L2 Data Parallelism](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l2.md): Give every GPU a full copy of the model and a different slice of the batch, average the gradients, take the same step everywhere. It is the simplest way to use N devices, the maths is exactly single-device training — and it does nothing at all for memory.
+- [D1.L3 ZeRO and FSDP](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l3.md): Data parallelism keeps N identical copies of 16 bytes per parameter. ZeRO keeps one copy, cut into N pieces: first the optimiser state, then the gradients, then the weights themselves — for the same communication as plain data parallelism, or 1.5× of it.
+- [D1.L4 Tensor Parallelism](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l4.md): When a single layer is too big or too slow for one GPU, split its matrices. Cut the first MLP matrix by columns and the second by rows, and the whole block needs exactly one all-reduce — but that all-reduce happens in every layer, twice per step, which is why tensor parallelism never leaves the server.
+- [D1.L5 Pipeline Parallelism](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l5.md): Give each GPU a contiguous slice of the layers and pass activations down the line. The communication is tiny and point-to-point — but the pipeline has to fill and drain every step, and while it does, GPUs sit idle. That idle time has a formula.
+- [D1.L6 Choosing a Layout](https://promiseowolabi.github.io/trainingspace/lessons-md/d1.l6.md): Real runs combine everything: tensor parallelism inside a server, pipeline stages across servers, data parallelism with sharded optimiser state across the rest, and activation checkpointing wherever memory is still short. Choosing the numbers is a memory budget and a communication budget, solved together.
+
+### F1 — Post-Training
+
+_A base model continues text; an assistant follows instructions. The distance between them is post-training, and every stage of it is a loss function: supervised fine-tuning on demonstrations, a reward model on preferences, and reinforcement learning — or its closed-form shortcut, DPO — against that reward. You will write each loss down and implement it._
+
+- [F1.L1 From Base Model to Assistant](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l1.md): A pretrained model continues text. Ask it a question and it may answer — or write three more questions, because that is what the web does after a question. Post-training is the comparatively tiny amount of training that turns a text predictor into something that follows instructions.
+- [F1.L2 SFT and Chat Templates](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l2.md): Supervised fine-tuning is pretraining's loss on a different document: a conversation, written in a fixed template, with the loss switched off on everything the user said. Get the template or the mask wrong and the model learns to impersonate the user.
+- [F1.L3 LoRA](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l3.md): Fine-tuning every weight of a 7B model needs 112 GB of training state. Freeze the weights and learn a low-rank correction to a few matrices instead, and the trainable part shrinks to a quarter of a percent — with no extra cost at inference once it is merged back in.
+- [F1.L4 Reward Models](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l4.md): People cannot write down a score for "a good answer", but they can say which of two answers is better. A reward model turns thousands of those comparisons into a function that scores any response — and a model optimised hard enough against it will find every flaw that function has.
+- [F1.L5 RLHF and DPO](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l5.md): RLHF samples responses, scores them with a reward model and pushes the policy towards high scores without drifting far from where it started — four models in memory and a notoriously finicky loop. DPO shows the same objective has a closed form you can train with a classification loss and two models.
+- [F1.L6 GRPO and Verifiable Rewards](https://promiseowolabi.github.io/trainingspace/lessons-md/f1.l6.md): When the answer can be checked — a maths result, a passing test suite — you do not need a learned reward model at all. Sample several answers to each problem, reward the right ones, and push the policy towards whatever beat its own average. No value model, no preference data.
+
+### E1 — Evals & Debugging
+
+_A training run produces a curve and a checkpoint; neither tells you whether the model is good or whether the run was healthy. This track covers what evaluations actually measure, the checklist for a run that will not learn, what a resume must restore, and how to read any training paper as a table of numbers you can check._
+
+- [E1.L1 What Evals Measure](https://promiseowolabi.github.io/trainingspace/lessons-md/e1.l1.md): A benchmark score is a sample statistic with an error bar, measured under specific prompting choices, on questions that may have leaked into training. Read every score as "70% ± 4, if nothing leaked, with this prompt" — or you will ship decisions on noise.
+- [E1.L2 Debugging a Run](https://promiseowolabi.github.io/trainingspace/lessons-md/e1.l2.md): Training bugs rarely crash. The loss goes down a bit, the run looks plausible, and the model is quietly worse than it should be. A short, fixed checklist — two numbers to predict and three experiments to run — catches most of them before the expensive run starts.
+- [E1.L3 Checkpointing and Resumption](https://promiseowolabi.github.io/trainingspace/lessons-md/e1.l3.md): At cluster scale, interruptions are not exceptions — they are a rate. A long run is a sequence of resumes, and a resume that is not exact quietly changes the experiment. Know what state a step depends on, save all of it, and choose how often from the failure rate.
+- [E1.L4 Reading a Training Paper](https://promiseowolabi.github.io/trainingspace/lessons-md/e1.l4.md): Every training paper is a set of numbers that must agree with each other: parameters, tokens, compute, hardware, hours. Put them in one table, recompute the ones you can, and you will know within ten minutes what the paper actually did — and where to look harder.
+
+## Labs
+
+- [Lab 00 — Shapes, FLOPs and Bytes](https://promiseowolabi.github.io/trainingspace/labs/numpy-shapes) (graded in your browser): Implement numpy's broadcasting rule by hand, vectorise a distance matrix, then put a FLOP count and a byte count on a matmul and a 7B training run.
+- [Lab 01 — An Autograd Engine in 100 Lines](https://promiseowolabi.github.io/trainingspace/labs/micrograd) (graded in your browser): A Value that remembers how it was made, a closure per operation, and a backward pass that walks the graph in reverse topological order.
+- [Lab 02 — Autograd for Arrays](https://promiseowolabi.github.io/trainingspace/labs/tensor-autograd) (graded in your browser): The same engine over numpy arrays: unbroadcasting, the matmul transpose rule, a fused stable cross-entropy, a gradient checker — and an MLP that trains on it.
+- [Lab 03 — Optimisers, Schedules and Clipping](https://promiseowolabi.github.io/trainingspace/labs/optimisers) (graded in your browser): SGD with momentum, Adam with bias correction, AdamW's decoupled weight decay, a warmup-cosine schedule and global-norm clipping — matched to PyTorch's update rules, then raced on a badly conditioned bowl.
+- [Lab 04 — A Byte-Level BPE Tokenizer](https://promiseowolabi.github.io/trainingspace/labs/bpe-tokenizer) (graded in your browser): Count pairs, merge the most frequent, repeat: train the tokenizer every GPT uses, encode and decode any Unicode string losslessly, and measure the compression it buys.
+- [Lab 05 — Attention, Heads and RoPE](https://promiseowolabi.github.io/trainingspace/labs/attention) (graded in your browser): Stable softmax, the causal mask, scaled dot-product attention over any batch shape, the head split, and rotary position embeddings — with a check that RoPE really makes attention depend only on distance.
+- [Lab 06 — A GPT Forward Pass](https://promiseowolabi.github.io/trainingspace/labs/gpt-forward) (graded in your browser): LayerNorm, GELU, the pre-norm block and tied embeddings: a GPT-2-architecture forward pass that matches a reference to 10⁻⁸, a parameter count that lands on 124,439,808, greedy decoding, and temperature, top-k and top-p sampling.
+- [Lab 07 — A Training Loop You Can Resume](https://promiseowolabi.github.io/trainingspace/labs/train-loop) (PyTorch · graded on your machine): Batches, AdamW parameter groups, gradient accumulation, clipping, bf16 autocast, evaluation and bit-exact checkpoint resume — the loop every pretraining run is built on, training a GPT on this course's own text on your CPU.
+- [Lab 08 — Budgeting a Training Run](https://promiseowolabi.github.io/trainingspace/labs/flops-and-memory) (graded in your browser): Parameter counts, 6·N·D, MFU, wall-clock days, training-state and activation memory, and the Chinchilla-optimal model for a FLOP budget — checked against GPT-2, GPT-3 and Chinchilla's published numbers.
+- [Lab 09 — Ring All-Reduce](https://promiseowolabi.github.io/trainingspace/labs/collectives) (graded in your browser): Reduce-scatter and all-gather around a simulated ring that only lets each rank talk to its neighbour — then measure that every rank sends exactly 2(N−1)/N of the data, whatever N is.
+- [Lab 10 — Data Parallelism from Scratch](https://promiseowolabi.github.io/trainingspace/labs/ddp-from-scratch) (PyTorch · graded on your machine): Two real processes on your machine, talking over torch.distributed's gloo backend: broadcast the weights, shard the batch, average the gradients — bucketed, like DDP — and match single-process training to 10⁻⁶.
+- [Lab 11 — ZeRO, Sharded](https://promiseowolabi.github.io/trainingspace/labs/zero-sharding) (graded in your browser): Shard Adam's state across simulated ranks, update only your slice, all-gather the result — and prove it trains identically to unsharded Adam while each rank holds 1/N of the optimiser state.
+- [Lab 12 — LoRA and the SFT Loss](https://promiseowolabi.github.io/trainingspace/labs/lora) (PyTorch · graded on your machine): Wrap frozen linear layers with a zero-initialised low-rank adapter, count what actually trains, merge it back for free inference, mask the prompt out of the loss — and watch a rank-2 adapter learn a rank-1 change exactly.
+- [Lab 13 — Preference and RL Losses](https://promiseowolabi.github.io/trainingspace/labs/preference-losses) (graded in your browser): Sequence log-probabilities, the Bradley–Terry reward loss, DPO with its implicit rewards and gradient weights, PPO's clipped objective, GRPO's group-relative advantages and the k3 KL estimator — each checked against its definition.
