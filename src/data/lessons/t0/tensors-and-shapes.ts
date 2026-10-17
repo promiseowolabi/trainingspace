@@ -6,7 +6,7 @@ const lesson: Lesson = {
   trackId: 't0',
   index: 2,
   title: 'Tensors and Shapes',
-  minutes: 18,
+  minutes: 24,
   hook: 'Half the bugs in training code are shape bugs, and most of them do not crash — numpy broadcasts the mistake into a plausible-looking wrong answer. Learn the one rule and the shape becomes the spec.',
   exercise: 'lab+quiz',
   takeaway: {
@@ -57,12 +57,124 @@ centered = y - mean_k             # (4, 8, 48)  broadcasting stretches the 1`,
       type: 'prose',
       md: `## Broadcasting: the one rule
 
-The last line subtracted a \`(4, 8, 1)\` array from a \`(4, 8, 48)\` one and got \`(4, 8, 48)\`. That is **broadcasting**, and its rule is short enough to memorise:
+The last line subtracted a \`(4, 8, 1)\` array from a \`(4, 8, 48)\` one and got \`(4, 8, 48)\`. The shapes are different, yet numpy did not complain. That is **broadcasting**. It has a four-line rule, but the rule only makes sense once you have seen what it is for, so build up to it with small arrays you can check by eye.
 
-1. Line the two shapes up **from the right**.
-2. A missing dimension on the left counts as **1**.
-3. Each aligned pair must be **equal**, or one of them must be **1**. A 1 is stretched (virtually — no copy is made) to match the other.
-4. Otherwise: error.
+### Step 1 — reading a shape
+
+A shape says how many items there are in each direction.
+
+| value | shape | read it as |
+|---|---|---|
+| \`5\` | \`()\` | one number, no directions |
+| \`[1, 2, 3]\` | \`(3,)\` | 3 across |
+| \`[[1, 2, 3], [4, 5, 6]]\` | \`(2, 3)\` | 2 down, 3 across |
+
+The **last** number in a shape is always "how many across" — the width of one row. Hold on to that; it is why the rule starts from the right.
+
+### Step 2 — every item needs a partner
+
+Adding two lists of the same length pairs them up by position, first with first, second with second:
+
+\`\`\`
+[1,  2,  3]
+[10, 20, 30]   +
+------------
+[11, 22, 33]
+\`\`\`
+
+That is all elementwise arithmetic is: every item on one side meets one partner on the other.
+
+### Step 3 — when one side has only one
+
+\`\`\`
+[1, 2, 3] + 10
+\`\`\`
+
+The 10 has no partner for the 2 or the 3. There is only **one** of it, so the sensible thing is obvious — reuse it:
+
+\`\`\`
+[1,  2,  3]
+[10, 10, 10]   +     ← the one 10, reused three times
+------------
+[11, 12, 13]
+\`\`\`
+
+That reuse **is** broadcasting. And "reused" is literal: numpy does not write out three 10s, it reads the same 10 three times. Nothing is copied.
+
+### Step 4 — when reuse makes no sense
+
+\`\`\`
+[1, 2, 3] + [10, 20]
+\`\`\`
+
+Who does the 3 pair with? Repeating 10 and 20 in some pattern would be a guess, so numpy refuses: \`operands could not be broadcast together with shapes (3,) (2,)\`.
+
+The difference between Step 3 and Step 4 is the whole idea: **one** value can fill any number of slots; **two** values cannot fill three.
+
+### Step 5 — a table plus a row
+
+\`\`\`
+table = [[1, 2, 3],      # (2, 3)
+         [4, 5, 6]]
+row   =  [10, 20, 30]    # (3,)
+\`\`\`
+
+Going across, the row has 3 items and each table row has 3 items, so they pair up as in Step 2. Going down, the table has 2 rows but there is only **one** \`row\`, so it is reused for each, as in Step 3:
+
+\`\`\`
+[[1, 2, 3],     [[10, 20, 30],     [[11, 22, 33],
+ [4, 5, 6]]  +   [10, 20, 30]]  =   [14, 25, 36]]
+                   ↑ the same row, reused
+\`\`\`
+
+This is exactly how a layer adds its bias: one bias row, reused for every example in the batch (fig 1).
+
+### Step 6 — a table plus a column
+
+Now give each **row** its own number instead — a column of shape \`(2, 1)\`: 2 down, 1 across.
+
+\`\`\`
+[[1, 2, 3],     [[100],        [[101, 102, 103],
+ [4, 5, 6]]  +   [200]]    =    [204, 205, 206]]
+\`\`\`
+
+Going down, 2 meets 2: row pairs with row. Going across, there is only **one** number in each row of the column, so it is reused for all 3 items. 100 lands on the whole first row, 200 on the whole second.
+
+### Step 7 — the trap
+
+Write that same column carelessly, as a plain list \`[100, 200]\` of shape \`(2,)\`, and it fails:
+
+\`\`\`
+table:  2  3
+list:      2     ← lined up against the 3, not the 2
+\`\`\`
+
+A plain list is always read as "across" (Step 1), so numpy tries to pair its 2 items with the table's 3 columns — Step 4 again — and raises. To mean "one number per row" you must say so with the shape \`(2, 1)\`. The dangerous version is when the sizes happen to match: with a 3 × 3 table, a length-3 list meant per row is silently applied per column. No error, wrong answer.
+
+### Step 8 — the rule is Steps 2–7 written down
+
+Write the two shapes one above the other, aligned on the right, and compare one column at a time:
+
+\`\`\`
+table:  2  3
+row:       3
+\`\`\`
+
+1. Line the two shapes up **from the right** — the "across" sizes meet first, because pairing items along a row is where you always start (Step 2).
+2. A missing dimension on the left counts as **1** — \`row\` has no "down" number; it is a single row, so it counts as 1 row (Step 5).
+3. Each aligned pair must be **equal** (items pair up, Step 2), or one of them must be **1** (that one is reused, Step 3). The reuse is virtual — no copy is made.
+4. Otherwise: error (Step 4).
+
+### Step 9 — the example from the code
+
+\`\`\`
+y:       4  8  48     4 sequences × 8 tokens × 48 numbers per token
+mean_k:  4  8   1     one number (the average) per token
+\`\`\`
+
+Right to left: **48 vs 1** — each token has one average, reused for all 48 of its numbers (Step 6). **8 vs 8** — token pairs with token. **4 vs 4** — sequence with sequence. The result is \`(4, 8, 48)\`: every token centred on its own average. Without \`keepdims=True\` the mean would be \`(4, 8)\`, which lines up 8 against 48 — Step 7's trap, and an error.
+
+### The rule, compactly
 
 \`\`\`
    (8, 1, 6)        (5, 4)          (3,)
@@ -71,7 +183,9 @@ The last line subtracted a \`(4, 8, 1)\` array from a \`(4, 8, 48)\` one and got
    (8, 7, 6)        (5, 4)         error: 3 vs 4
 \`\`\`
 
-Lab 00 has you implement this rule without numpy, which is the fastest way to make it automatic.`,
+In the first, both sides have a 1 somewhere: the 1 in \`(8, 1, 6)\` is reused 7 times, the 1 in \`(7, 1)\` is reused 6 times, and the missing left dimension counts as 1 and is reused 8 times.
+
+If you remember one sentence: **every item needs a partner; if one side has only one of something it is reused, and if both sides have several and the counts differ, it is an error.** Lab 00 has you implement this rule without numpy, which is the fastest way to make it automatic.`,
     },
     {
       type: 'diagram',

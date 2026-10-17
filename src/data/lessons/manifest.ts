@@ -49,7 +49,7 @@ export const LESSON_META: LessonMeta[] = [
     trackId: "t0",
     index: 2,
     title: "Tensors and Shapes",
-    minutes: 18,
+    minutes: 24,
     hook: "Half the bugs in training code are shape bugs, and most of them do not crash — numpy broadcasts the mistake into a plausible-looking wrong answer. Learn the one rule and the shape becomes the spec.",
     exercise: "lab+quiz",
     labs: ["numpy-shapes"],
